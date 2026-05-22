@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * AGENTS.md §4 — Modern Dark Theme. The full canvas is dark by default;
+ * `darkMode: "class"` in tailwind.config keeps the option open for a
+ * future light theme without rewrites.
+ */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #0d1117; /* canvas — §4.2 */
+  color: #f0f6fc; /* text-primary — §4.2 */
+}
+
+/* Tabular numerals everywhere money lives.
+ * Apply `font-mono tabular-nums` on numeric spans (§4.3). */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle scrollbar to match canvas without competing for attention. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #444c56;
+}

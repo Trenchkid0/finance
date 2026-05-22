@@ -1,0 +1,166 @@
+// Prisma schema — Maybe Finance
+// Scope: MVP per req.txt phase 1 (auth + accounts + transactions + categories).
+// Phase 2 models (Budget, Investment, ImportLog) come later.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTH (NextAuth.js v5 / Auth.js Prisma adapter) ====================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  // Hashed via bcryptjs when registering through the Credentials provider.
+  password      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts        Account[]
+  sessions        Session[]
+  financeAccounts FinanceAccount[]
+  categories      Category[]
+  transactions    Transaction[]
+
+  @@map("users")
+}
+
+/// OAuth provider link table required by Auth.js Prisma adapter.
+/// Renamed in DB to `auth_accounts` to avoid colliding with the
+/// finance-domain "accounts" concept (`finance_accounts`).
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("auth_accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("auth_sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("auth_verification_tokens")
+}
+
+// ==================== DOMAIN ====================
+
+enum AccountType {
+  bank
+  wallet
+  cash
+  investment
+}
+
+enum TransactionType {
+  income
+  expense
+  transfer
+}
+
+enum CategoryType {
+  income
+  expense
+}
+
+/// User-owned source of funds: bank account, e-wallet, cash, investment vault.
+model FinanceAccount {
+  id        String      @id @default(cuid())
+  userId    String
+  name      String
+  type      AccountType
+  balance   Decimal     @default(0) @db.Decimal(15, 2)
+  currency  String      @default("IDR")
+  icon      String?
+  color     String?
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[] @relation("AccountTransactions")
+  transfersIn  Transaction[] @relation("TransferDestination")
+
+  @@index([userId])
+  @@map("finance_accounts")
+}
+
+/// Income / expense category. `userId IS NULL` rows are seeded defaults
+/// shared across users; per-user categories override / extend them.
+model Category {
+  id        String       @id @default(cuid())
+  userId    String?
+  name      String
+  type      CategoryType
+  icon      String?
+  color     String?
+  isDefault Boolean      @default(false)
+  createdAt DateTime     @default(now())
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId])
+  @@map("categories")
+}
+
+/// A single financial event. Transfer-type rows link two FinanceAccounts
+/// via `accountId` (source) and `transferToId` (destination).
+model Transaction {
+  id           String          @id @default(cuid())
+  userId       String
+  accountId    String
+  categoryId   String?
+  type         TransactionType
+  amount       Decimal         @db.Decimal(15, 2)
+  description  String?
+  note         String?         @db.Text
+  date         DateTime        @default(now())
+  transferToId String?
+
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account    FinanceAccount  @relation("AccountTransactions", fields: [accountId], references: [id], onDelete: Cascade)
+  transferTo FinanceAccount? @relation("TransferDestination", fields: [transferToId], references: [id], onDelete: SetNull)
+  category   Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, date])
+  @@index([accountId])
+  @@index([categoryId])
+  @@map("transactions")
+}
