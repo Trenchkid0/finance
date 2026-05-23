@@ -55,6 +55,10 @@ import {
   type CategoryOption,
   type TransactionFormInitial,
 } from "./TransactionForm";
+import {
+  InlineCategoryPicker,
+  TransferBadge,
+} from "./InlineCategoryPicker";
 
 export interface TransactionRowData {
   id: string;
@@ -213,6 +217,7 @@ export function TransactionsClient({
 
       <TransactionsList
         transactions={transactions}
+        categories={categories}
         onEdit={setEditing}
         onDelete={setConfirmDelete}
         onDuplicate={startDuplicate}
@@ -598,12 +603,14 @@ function FilterSelect({
  */
 function TransactionsList({
   transactions,
+  categories,
   onEdit,
   onDelete,
   onDuplicate,
   emptyState,
 }: {
   transactions: TransactionRowData[];
+  categories: CategoryOption[];
   onEdit: (row: TransactionRowData) => void;
   onDelete: (row: TransactionRowData) => void;
   onDuplicate: (row: TransactionRowData) => void;
@@ -633,6 +640,7 @@ function TransactionsList({
           <DateGroup
             key={group.date}
             group={group}
+            categories={categories}
             onEdit={onEdit}
             onDelete={onDelete}
             onDuplicate={onDuplicate}
@@ -696,11 +704,13 @@ function formatGroupDate(iso: string): string {
 
 function DateGroup({
   group,
+  categories,
   onEdit,
   onDelete,
   onDuplicate,
 }: {
   group: TransactionGroup;
+  categories: CategoryOption[];
   onEdit: (row: TransactionRowData) => void;
   onDelete: (row: TransactionRowData) => void;
   onDuplicate: (row: TransactionRowData) => void;
@@ -731,6 +741,7 @@ function DateGroup({
           <TransactionRow
             key={tx.id}
             tx={tx}
+            categories={categories}
             onEdit={onEdit}
             onDelete={onDelete}
             onDuplicate={onDuplicate}
@@ -743,11 +754,13 @@ function DateGroup({
 
 function TransactionRow({
   tx,
+  categories,
   onEdit,
   onDelete,
   onDuplicate,
 }: {
   tx: TransactionRowData;
+  categories: CategoryOption[];
   onEdit: (row: TransactionRowData) => void;
   onDelete: (row: TransactionRowData) => void;
   onDuplicate: (row: TransactionRowData) => void;
@@ -780,24 +793,19 @@ function TransactionRow({
         </div>
       </div>
 
-      {/* Category badge (col-span 3) */}
+      {/* Category badge (col-span 3) — klik untuk re-categorize */}
       <div className="hidden md:flex md:col-span-3 items-center min-w-0">
         {tx.type === "transfer" ? (
-          <Badge variant="outline" className="font-normal">
-            <ArrowLeftRight size={10} />
-            Transfer
-          </Badge>
-        ) : tx.categoryName ? (
-          <Badge variant="secondary" className="font-normal truncate">
-            {tx.categoryIcon ? (
-              <span aria-hidden>{tx.categoryIcon}</span>
-            ) : null}
-            <span className="truncate">{tx.categoryName}</span>
-          </Badge>
+          <TransferBadge transferToName={tx.transferToName} />
         ) : (
-          <Badge variant="outline" className="font-normal">
-            Tanpa kategori
-          </Badge>
+          <InlineCategoryPicker
+            transactionId={tx.id}
+            type={tx.type}
+            categoryId={tx.categoryId}
+            categoryName={tx.categoryName}
+            categoryIcon={tx.categoryIcon}
+            categories={categories}
+          />
         )}
       </div>
 

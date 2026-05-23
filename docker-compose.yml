@@ -1,77 +1,58 @@
 # =============================================================================
-# Maybe Finance — Docker stack
+# Maybe Finance — Docker stack (default = MySQL EKSTERNAL)
 #
-# Layanan:
-#   - db        MySQL 8.4 (LTS) dengan persistent volume
-#   - migrate   one-shot job: prisma db push + (opsional) seed → exit 0
+# Stack default ini hanya berisi 2 service:
+#   - migrate   one-shot: prisma db push → exit 0
 #   - app       Next.js standalone server, port 3000
 #
-# Network internal `maybe-net` supaya app berbicara ke DB lewat hostname `db`.
-# Hanya `app` yang expose port ke host (3000).
+# Database tidak dibungkus di sini. Ada 3 skenario koneksi yang
+# didukung — semua diatur lewat `DATABASE_URL_INTERNAL` di .env.docker:
 #
-# Cara pakai:
+#   A. MySQL native di host (Linux/Mac/Windows) yang sama
+#      → host: host.docker.internal
+#
+#   B. MySQL native di host lain (LAN / VPN)
+#      → host: 192.168.x.y atau db.internal.example.com
+#
+#   C. MySQL ikut di compose (bundled) — tambahkan overlay
+#      → docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml ...
+#      → host: db
+#
+# `extra_hosts: host.docker.internal:host-gateway` memastikan hostname
+# tersebut resolve ke IP gateway docker bridge — wajib di Linux native
+# (Docker Desktop Mac/Windows sudah otomatis, tapi explicit aman).
+#
+# Cara pakai standar:
 #   1. cp .env.docker.example .env.docker
-#   2. Edit .env.docker (set MYSQL_PASSWORD, AUTH_SECRET, DEEPSEEK_API_KEY)
-#   3. docker compose up -d
+#   2. Edit DATABASE_URL_INTERNAL + AUTH_SECRET di .env.docker
+#   3. docker compose --env-file .env.docker up -d --build
 #   4. Buka http://localhost:3000
 # =============================================================================
 
 services:
-  db:
-    image: mysql:8.4
-    container_name: maybe-db
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-maybe_finance}
-      MYSQL_USER: ${MYSQL_USER:-maybe}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD di .env.docker}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD di .env.docker}
-    volumes:
-      - maybe-db-data:/var/lib/mysql
-    healthcheck:
-      # `mysqladmin ping` cukup memastikan daemon menerima koneksi.
-      # Kita pakai `--silent` supaya healthcheck output bersih.
-      test:
-        [
-          "CMD",
-          "mysqladmin",
-          "ping",
-          "-h",
-          "127.0.0.1",
-          "-u",
-          "root",
-          "-p${MYSQL_ROOT_PASSWORD}",
-          "--silent",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    networks:
-      - maybe-net
-    # Default port 3306 sengaja TIDAK di-publish ke host. Buka comment
-    # baris di bawah kalau perlu akses dari workbench/DBeaver.
-    # ports:
-    #   - "3306:3306"
-
   migrate:
-    # One-shot container untuk sync schema. Pakai stage `builder` karena
-    # butuh node_modules + prisma CLI yang tidak ada di image runtime.
+    # One-shot container untuk sync schema ke DB target. Pakai stage
+    # `builder` karena butuh node_modules + prisma CLI yang tidak ada
+    # di image runtime.
     build:
       context: .
       target: builder
     container_name: maybe-migrate
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL_INTERNAL:?Set DATABASE_URL_INTERNAL}
-      DB_HOST: db
-      DB_PORT: 3306
+      DATABASE_URL: ${DATABASE_URL_INTERNAL:?Set DATABASE_URL_INTERNAL di .env.docker}
+      # DB_HOST/DB_PORT dipakai oleh entrypoint.sh untuk TCP probe
+      # sebelum prisma push. Default ke `host.docker.internal` supaya
+      # skenario A (DB native di host yang sama) jalan langsung.
+      DB_HOST: ${DB_HOST:-host.docker.internal}
+      DB_PORT: ${DB_PORT:-3306}
       SEED_ON_STARTUP: ${SEED_ON_STARTUP:-false}
     volumes:
       - ./docker/entrypoint.sh:/app/docker/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/app/docker/entrypoint.sh"]
+    extra_hosts:
+      # Linux native butuh ini untuk resolve host.docker.internal.
+      # Docker Desktop (Mac/Windows) sudah otomatis, tapi tetap valid.
+      - "host.docker.internal:host-gateway"
     networks:
       - maybe-net
     restart: "no"
@@ -83,26 +64,22 @@ services:
     container_name: maybe-app
     restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${DATABASE_URL_INTERNAL}
+      DATABASE_URL: ${DATABASE_URL_INTERNAL:?Set DATABASE_URL_INTERNAL di .env.docker}
       AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET di .env.docker}
       AUTH_URL: ${AUTH_URL:-http://localhost:3000}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       NODE_ENV: production
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_PORT:-3000}:3000"
     networks:
       - maybe-net
-
-volumes:
-  maybe-db-data:
-    driver: local
 
 networks:
   maybe-net:

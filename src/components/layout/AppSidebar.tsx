@@ -36,6 +36,8 @@ interface NavItem {
   icon: LucideIcon;
   /** Optional numeric badge — count of related resources. */
   badge?: number;
+  /** Tone untuk badge. Default neutral. `warning` = ada masalah (mis. saldo minus). */
+  badgeTone?: "neutral" | "warning";
 }
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
@@ -48,6 +50,8 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   counts?: {
     accounts?: number;
     transactions?: number;
+    /** Akun dengan saldo ≤ 0 — surface sebagai warning badge supaya user tahu. */
+    accountsAtRisk?: number;
   };
 }
 

@@ -1,80 +1,250 @@
 # Deploy Maybe Finance dengan Docker
 
-Panduan ini mengikuti file Docker yang sudah ada di folder ini:
-`Dockerfile`, `docker-compose.yml`, `.dockerignore`, `docker/entrypoint.sh`,
-dan `.env.docker.example`.
+Panduan ini mengikuti file Docker yang sudah ada:
+`Dockerfile`, `docker-compose.yml`, `docker-compose.bundled-db.yml`,
+`.dockerignore`, `docker/entrypoint.sh`, dan `.env.docker.example`.
 
-Stack yang akan jalan:
+Default `docker-compose.yml` mengasumsikan **MySQL berada di luar Docker**
+(native di host, atau di server lain). Kalau Anda mau MySQL ikut bundled,
+ada overlay `docker-compose.bundled-db.yml` — opt-in lewat `-f`.
 
 | Service | Image | Fungsi |
 |---|---|---|
-| `db` | `mysql:8.4` | MySQL persistent dengan volume `maybe-db-data` |
 | `migrate` | dari `Dockerfile` (target `builder`) | One-shot: tunggu DB siap → `prisma db push` → exit 0 |
-| `app` | dari `Dockerfile` (target `runner`) | Next.js standalone server di port 3000 |
-
-Ketiganya berbagi network internal `maybe-net`. Hanya `app` yang publish port ke host.
+| `app` | dari `Dockerfile` (target `runner`) | Next.js standalone di port 3000 |
+| `db` *(opsional)* | `mysql:8.4` | Aktif **hanya** kalau pakai overlay bundled-db |
 
 ---
 
 ## 0. Prasyarat
 
-- **Docker Engine** ≥ 24 dan **Docker Compose v2** (perintah `docker compose`, bukan `docker-compose` lama).
-- **OpenSSL** atau Node 20+ untuk generate `AUTH_SECRET`.
-- Port `3000` di host bebas (atau pakai port lain — lihat langkah 2).
+- **Docker Engine** ≥ 24 dan **Docker Compose v2** (`docker compose`, bukan `docker-compose` legacy)
+- **OpenSSL** atau Node 20+ untuk generate `AUTH_SECRET`
+- Port `3000` di host bebas (atau pakai port lain — lihat langkah 2)
+- **MySQL 8.x** sudah jalan dan accessible **kalau Anda pakai skenario A atau B**
 
-Cek dengan:
+Cek versi:
 
 ```bash
-docker --version          # Docker version 24.0.0+
-docker compose version    # Docker Compose version v2.20.0+
+docker --version
+docker compose version
 ```
 
 ---
 
-## 1. Clone repo dan masuk ke folder app
+## 1. Pilih skenario koneksi database
 
-```bash
-git clone <url-repo>
-cd maybe-finance
-```
+Lihat tabel ini, lalu lompat ke section yang relevan.
 
-Pastikan Anda berada di folder yang sama dengan `Dockerfile` — semua perintah `docker compose` berikutnya dijalankan dari sini.
+| | Database location | Hostname dari container | Setup butuh |
+|---|---|---|---|
+| **A** | MySQL native di **host yang sama** dengan Docker | `host.docker.internal` | MySQL listen di all interfaces, user dengan host `%` atau IP bridge |
+| **B** | MySQL native di **host lain** (LAN/VPN/cloud) | IP atau FQDN target | Routing + firewall mengizinkan port 3306 |
+| **C** | MySQL **ikut compose** (bundled) | `db` | Tidak perlu MySQL terinstal |
 
 ---
 
-## 2. Buat file `.env.docker`
+## 2. Skenario A — MySQL di host yang sama
 
-Salin template:
+### 2.1 Konfigurasi MySQL host
+
+Edit `/etc/mysql/mysql.conf.d/mysqld.cnf` (atau `my.cnf`):
+
+```ini
+[mysqld]
+bind-address = 0.0.0.0
+```
+
+> Default Ubuntu/Debian: `bind-address = 127.0.0.1` — ini tidak bisa diakses
+> dari container Docker. Set ke `0.0.0.0` (semua interface) atau IP bridge
+> docker spesifik (mis. `172.17.0.1`).
+
+Restart MySQL:
+
+```bash
+sudo systemctl restart mysql
+```
+
+Buat database + user (dari shell MySQL):
+
+```sql
+CREATE DATABASE maybe_finance CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Wildcard host '%' supaya container Docker bisa connect dari IP berapapun
+-- di docker bridge network (172.17.x.x by default).
+CREATE USER 'maybe'@'%' IDENTIFIED BY 'GANTI-PASSWORD-INI';
+GRANT ALL PRIVILEGES ON maybe_finance.* TO 'maybe'@'%';
+FLUSH PRIVILEGES;
+```
+
+### 2.2 Buka firewall (jika ada)
+
+Linux native dengan UFW:
+
+```bash
+# Izinkan koneksi dari docker bridge ke port MySQL host
+sudo ufw allow from 172.17.0.0/16 to any port 3306
+sudo ufw reload
+```
+
+> Bridge default Docker biasanya `172.17.0.0/16`. Cek dengan
+> `docker network inspect bridge` kalau Anda pakai jaringan custom.
+
+### 2.3 Konfigurasi `.env.docker`
 
 ```bash
 cp .env.docker.example .env.docker
 ```
 
-Lalu edit `.env.docker`. Minimal Anda harus mengisi 4 nilai:
+Edit `.env.docker`:
 
 ```bash
-# --- MySQL credentials -----------------------------------------------
-MYSQL_DATABASE=maybe_finance
-MYSQL_USER=maybe
-MYSQL_PASSWORD=ganti-password-yang-kuat
-MYSQL_ROOT_PASSWORD=ganti-root-password-yang-kuat
+DATABASE_URL_INTERNAL=mysql://maybe:GANTI-PASSWORD-INI@host.docker.internal:3306/maybe_finance
+DB_HOST=host.docker.internal
+DB_PORT=3306
 
-# --- Connection string yang dipakai container app & migrate ----------
-# `db` adalah nama service compose. JANGAN ganti ke localhost.
-DATABASE_URL_INTERNAL=mysql://maybe:ganti-password-yang-kuat@db:3306/maybe_finance
-
-# --- NextAuth.js -----------------------------------------------------
-AUTH_SECRET=        # generate: openssl rand -base64 32
+AUTH_SECRET=                     # generate: openssl rand -base64 32
 AUTH_URL=http://localhost:3000
 
-# --- Optional --------------------------------------------------------
-DEEPSEEK_API_KEY=   # kosongkan kalau tidak pakai Scan AI
-
+DEEPSEEK_API_KEY=                # opsional
 APP_PORT=3000
 SEED_ON_STARTUP=false
 ```
 
-### 2.1 Generate `AUTH_SECRET`
+### 2.4 Start
+
+```bash
+docker compose --env-file .env.docker up -d --build
+```
+
+Compose akan:
+1. Build image `app` dan `migrate`
+2. Run `migrate` → TCP probe ke `host.docker.internal:3306` → `prisma db push` → exit 0
+3. Start `app` di port 3000
+
+**Skip ke section 6** untuk verifikasi.
+
+---
+
+## 3. Skenario B — MySQL di server lain (LAN / VPN / cloud)
+
+### 3.1 Pastikan koneksi reachable
+
+Dari mesin tempat Docker jalan:
+
+```bash
+# TCP probe (butuh nc atau telnet)
+nc -zv 192.168.18.5 3306
+# Connection to 192.168.18.5 3306 port [tcp/mysql] succeeded!
+```
+
+Kalau timeout / refused:
+- MySQL di server tujuan listen di `0.0.0.0` atau IP yang reachable
+- Firewall server tujuan mengizinkan port 3306 dari IP Docker host
+- Routing LAN/VPN benar
+
+### 3.2 Konfigurasi MySQL server tujuan
+
+Sama seperti 2.1, plus pastikan user terikat ke IP source yang benar.
+Untuk safety, batasi ke IP host Docker (bukan wildcard `%`):
+
+```sql
+CREATE USER 'maybe'@'192.168.x.y' IDENTIFIED BY 'GANTI-PASSWORD-INI';
+GRANT ALL PRIVILEGES ON maybe_finance.* TO 'maybe'@'192.168.x.y';
+FLUSH PRIVILEGES;
+```
+
+### 3.3 Konfigurasi `.env.docker`
+
+```bash
+DATABASE_URL_INTERNAL=mysql://maybe:GANTI-PASSWORD-INI@192.168.18.5:3306/maybe_finance
+DB_HOST=192.168.18.5
+DB_PORT=3306
+
+AUTH_SECRET=
+AUTH_URL=http://localhost:3000
+APP_PORT=3000
+```
+
+### 3.4 Start
+
+```bash
+docker compose --env-file .env.docker up -d --build
+```
+
+**Skip ke section 6** untuk verifikasi.
+
+### Cloud-managed MySQL (PlanetScale / RDS / Aiven / dll)
+
+Kalau pakai TLS connection (umumnya wajib di managed cloud):
+
+```bash
+# PlanetScale style
+DATABASE_URL_INTERNAL="mysql://user:pass@aws.connect.psdb.cloud:3306/maybe_finance?ssl={\"rejectUnauthorized\":true}"
+
+# Generic dengan SSL CA
+DATABASE_URL_INTERNAL="mysql://user:pass@db.example.com:3306/maybe_finance?ssl-mode=REQUIRED"
+```
+
+Format query string SSL spesifik per provider — cek dokumentasi mereka.
+
+---
+
+## 4. Skenario C — MySQL bundled di compose
+
+Pakai ini **hanya** kalau Anda tidak punya MySQL terinstal di mana pun.
+
+### 4.1 Konfigurasi `.env.docker`
+
+Edit `.env.docker`, pakai konfigurasi Skenario C:
+
+```bash
+DATABASE_URL_INTERNAL=mysql://maybe:passwordmu@db:3306/maybe_finance
+DB_HOST=db
+DB_PORT=3306
+
+# WAJIB ada saat overlay bundled-db aktif
+MYSQL_DATABASE=maybe_finance
+MYSQL_USER=maybe
+MYSQL_PASSWORD=passwordmu
+MYSQL_ROOT_PASSWORD=root-password-yang-kuat
+
+AUTH_SECRET=
+AUTH_URL=http://localhost:3000
+```
+
+### 4.2 Start dengan overlay
+
+Tambahkan flag `-f docker-compose.bundled-db.yml`:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.bundled-db.yml \
+  --env-file .env.docker \
+  up -d --build
+```
+
+Compose akan tambahkan service `db` (mysql:8.4) ke stack, dan
+`migrate` + `app` otomatis menunggu `db` healthy sebelum start.
+
+> Setiap kali Anda menjalankan compose untuk stack ini, ikutkan kedua
+> flag `-f`. Tanpa overlay, service `db` tidak akan diketahui dan
+> compose akan coba connect ke `host.docker.internal` (Skenario A)
+> yang kemungkinan bukan yang Anda inginkan.
+
+Untuk menyederhanakan, tambahkan alias di shell profile:
+
+```bash
+alias maybe="docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml --env-file .env.docker"
+maybe up -d --build
+maybe ps
+maybe logs -f app
+```
+
+---
+
+## 5. Generate `AUTH_SECRET`
 
 Pilih salah satu:
 
@@ -86,209 +256,102 @@ npx auth secret
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Salin nilai yang muncul ke baris `AUTH_SECRET=...`.
-
-### 2.2 Sinkronkan password
-
-`MYSQL_PASSWORD` dan password di `DATABASE_URL_INTERNAL` **harus sama**. Kalau Anda set:
-
-```
-MYSQL_PASSWORD=Sup3rR4ndom!
-```
-
-Maka:
-
-```
-DATABASE_URL_INTERNAL=mysql://maybe:Sup3rR4ndom!@db:3306/maybe_finance
-```
-
-> **Karakter khusus**: kalau password mengandung `@`, `:`, `/`, `?`, `#`, atau `&`, encode di URL dengan percent-encoding (mis. `@` → `%40`).
-
-### 2.3 Pilih port host (opsional)
-
-Default `APP_PORT=3000`. Kalau di host port 3000 sudah dipakai, ganti misal `APP_PORT=8080`. Akses jadi `http://localhost:8080`.
+Salin nilai ke baris `AUTH_SECRET=` di `.env.docker`.
 
 ---
 
-## 3. Build image dan start stack
-
-```bash
-docker compose --env-file .env.docker up -d --build
-```
-
-- `--env-file .env.docker` → compose membaca file env yang Anda buat di langkah 2.
-- `-d` → jalankan di background (detached).
-- `--build` → force rebuild image kalau ada perubahan kode.
-
-Compose akan menjalankan urutan ini secara otomatis:
-
-1. Pull image `mysql:8.4` (sekali saja, ~150MB).
-2. Build image `app` dan `migrate` dari `Dockerfile` (~3–5 menit pertama kali).
-3. Start `db` → tunggu sampai healthy (`mysqladmin ping` lulus).
-4. Start `migrate` → jalankan `prisma db push` → exit 0.
-5. Start `app` → siap melayani request di port 3000.
-
-### 3.1 Cek status
+## 6. Verifikasi
 
 ```bash
 docker compose ps
 ```
 
-Output yang diharapkan:
+Output yang diharapkan (Skenario A/B):
 
 ```
-NAME            STATUS                   PORTS
-maybe-db        Up 30s (healthy)
-maybe-migrate   Exited (0) 12s ago
-maybe-app       Up 8s                    0.0.0.0:3000->3000/tcp
+NAME             STATUS                   PORTS
+maybe-migrate    Exited (0) 12s ago
+maybe-app        Up 8s                    0.0.0.0:3000->3000/tcp
 ```
 
-`maybe-migrate` **harus** `Exited (0)`. Kalau `Exited (1)` artinya migrasi gagal — lihat bagian Troubleshooting.
+`maybe-migrate` **harus** `Exited (0)`. Kalau `Exited (1)` → migrasi gagal,
+lihat **Troubleshooting**.
 
-### 3.2 Tail log app
+Tail log:
 
 ```bash
 docker compose logs -f app
 ```
 
-Tunggu sampai muncul:
-
-```
-✓ Ready in XXXms
-```
-
-Tekan `Ctrl+C` untuk keluar dari log (container tetap jalan).
+Tunggu sampai muncul `✓ Ready in XXXms`, lalu buka
+`http://localhost:3000` (atau `APP_PORT` yang Anda set).
 
 ---
 
-## 4. Verifikasi
-
-Buka `http://localhost:3000` (atau port yang Anda set di `APP_PORT`).
-
-- Halaman login muncul → ✅ stack jalan.
-- Klik "Daftar gratis" → buat akun pertama → langsung masuk dashboard.
-
-### 4.1 Atau seed data demo (opsional)
-
-Kalau Anda mau punya data dummy untuk eksplorasi:
+## 7. Operasi sehari-hari
 
 ```bash
-# 1. Edit .env.docker → set SEED_ON_STARTUP=true
-# 2. Restart container migrate untuk pickup env baru
-docker compose --env-file .env.docker up -d --force-recreate migrate
-
-# 3. Setelah seed sukses, kembalikan SEED_ON_STARTUP=false
-#    (supaya restart berikutnya tidak menambah data ganda)
-```
-
-Login demo: `demo@maybe.local` / `password123`.
-
-### 4.2 Smoke test API
-
-```bash
-# Buat kunci API lewat web (Pengaturan → Kunci API → Buat kunci),
-# salin nilai 64-char hex, lalu:
-curl http://localhost:3000/api/v1/me \
-  -H "Authorization: Bearer <kunci-anda>"
-```
-
-Response harus `{ "ok": true, "data": { ... } }`.
-
----
-
-## 5. Operasi sehari-hari
-
-### Stop semua container
-
-```bash
+# Stop semua container
 docker compose down
-```
 
-Data MySQL tetap aman di volume `maybe-db-data`.
-
-### Restart tanpa rebuild
-
-```bash
+# Restart tanpa rebuild
 docker compose --env-file .env.docker up -d
-```
 
-### Update versi aplikasi
-
-```bash
+# Update versi aplikasi
 git pull
 docker compose --env-file .env.docker up -d --build
+
+# Tail log spesifik
+docker compose logs -f app
+docker compose logs migrate
 ```
 
-`migrate` akan jalan ulang dan menyamakan schema kalau ada perubahan Prisma. Aman karena `prisma db push` idempoten.
-
-### Lihat log spesifik
-
-```bash
-docker compose logs -f app          # log Next.js
-docker compose logs -f db           # log MySQL
-docker compose logs migrate         # log migrasi (one-shot)
-```
-
-### Eksekusi perintah di dalam container
-
-```bash
-# Buka shell di container app
-docker compose exec app sh
-
-# Run prisma studio (port 5555 — perlu publish manual)
-docker compose exec migrate npx prisma studio
-```
+> Untuk Skenario C (bundled), selalu ikutkan flag `-f docker-compose.yml -f docker-compose.bundled-db.yml`.
 
 ---
 
-## 6. Backup dan restore
+## 8. Backup dan restore
 
-### Backup database ke file lokal
+### Skenario A & B (MySQL native)
+
+Pakai tool MySQL langsung di host:
 
 ```bash
-docker compose exec db \
-  mysqldump -u maybe -p"$MYSQL_PASSWORD" maybe_finance \
+# Backup
+mysqldump -u maybe -p maybe_finance > backup-$(date +%Y%m%d).sql
+
+# Restore
+mysql -u maybe -p maybe_finance < backup-20260523.sql
+```
+
+### Skenario C (bundled)
+
+```bash
+# Backup
+docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml \
+  exec db mysqldump -u maybe -p"$MYSQL_PASSWORD" maybe_finance \
   > backup-$(date +%Y%m%d).sql
-```
 
-Saat ditanya password, pakai `MYSQL_PASSWORD` dari `.env.docker`.
-
-### Restore dari file backup
-
-```bash
-cat backup-20260523.sql | \
-  docker compose exec -T db \
-  mysql -u maybe -p"$MYSQL_PASSWORD" maybe_finance
-```
-
-`-T` melepas TTY agar pipe stdin bekerja.
-
-### Backup volume secara penuh (snapshot)
-
-```bash
-# Export volume ke tarball
-docker run --rm \
-  -v maybe-finance_maybe-db-data:/data \
-  -v "$(pwd)":/backup \
-  alpine tar czf /backup/db-volume-$(date +%Y%m%d).tgz -C /data .
+# Restore
+cat backup.sql | docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml \
+  exec -T db mysql -u maybe -p"$MYSQL_PASSWORD" maybe_finance
 ```
 
 ---
 
-## 7. Production hardening
+## 9. Production hardening
 
-Sebelum deploy ke server publik, pastikan:
-
-- [ ] `AUTH_SECRET` di-rotate ke nilai random 32+ byte yang **belum pernah** dipakai
+- [ ] `AUTH_SECRET` random 32+ byte yang **belum pernah** dipakai
 - [ ] `AUTH_URL` mengikuti domain HTTPS asli (mis. `https://finance.example.com`)
-- [ ] Password MySQL kuat (minimum 16 karakter, mix alfanumerik + simbol)
-- [ ] Reverse proxy (nginx/traefik/caddy) di depan `app` untuk TLS termination
+- [ ] Password MySQL kuat (16+ karakter, alfanumerik + simbol)
+- [ ] Reverse proxy (nginx/traefik/caddy) di depan `app` dengan TLS termination
 - [ ] Backup `mysqldump` rutin via cron + offsite (R2/S3/rsync)
-- [ ] `SEED_ON_STARTUP=false` di production (seed hanya untuk demo lokal)
-- [ ] Container `app` jalan sebagai user non-root (sudah di-set di `Dockerfile`, jangan diubah)
-- [ ] Port MySQL **tidak** dipublish ke host (default `docker-compose.yml` sudah benar — port 3306 hanya di internal network)
+- [ ] `SEED_ON_STARTUP=false` setelah seed pertama (atau selalu false di production)
+- [ ] Container `app` jalan sebagai user non-root (sudah di-set di `Dockerfile`)
+- [ ] **Skenario A/B**: MySQL **tidak** listen di public interface kalau host punya IP publik. Bind ke `127.0.0.1` + bridge IP, atau pakai VPN/SSH tunnel
+- [ ] **Skenario A/B**: User MySQL terikat ke IP source spesifik, bukan wildcard `%`
 
-### Contoh nginx sederhana di depan `app`
+### Contoh nginx di depan `app`
 
 ```nginx
 server {
@@ -305,128 +368,121 @@ server {
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
 
-    # Next.js streaming + SSE friendly
     proxy_buffering off;
     proxy_read_timeout 300s;
   }
 }
 ```
 
-Pastikan `AUTH_URL=https://finance.example.com` di `.env.docker` agar Auth.js generate redirect URL yang benar.
+Pastikan `AUTH_URL=https://finance.example.com` di `.env.docker`.
 
 ---
 
-## 8. Troubleshooting
+## 10. Troubleshooting
 
-### `migrate` Exited (1) — schema sync gagal
+### A. `migrate` Exited (1) — TCP probe gagal
 
-Cek log untuk error spesifik:
+Log mirip:
 
-```bash
-docker compose logs migrate
+```
+✗ Database tidak ready setelah 60s pada host.docker.internal:3306.
+  Cek:
+  - MySQL listen di alamat yang benar (bukan hanya 127.0.0.1)
+  - Firewall mengizinkan port 3306 dari subnet docker
+  - DATABASE_URL_INTERNAL host = host.docker.internal
 ```
 
-Penyebab umum:
+Sebab umum:
 
-| Pesan log | Solusi |
+| Kondisi | Solusi |
 |---|---|
-| `Can't reach database server at db:3306` | Tunggu 10–15 detik lagi (MySQL boot lambat di mesin lambat) lalu `docker compose up -d migrate` |
-| `Access denied for user 'maybe'` | `MYSQL_PASSWORD` ≠ password di `DATABASE_URL_INTERNAL`. Cek langkah 2.2 |
-| `Unknown database 'maybe_finance'` | `MYSQL_DATABASE` di env ≠ nama DB di URL. Sinkronkan keduanya |
+| MySQL `bind-address = 127.0.0.1` | Edit ke `0.0.0.0`, restart MySQL |
+| `host.docker.internal` tidak resolve di Linux native | Cek bahwa `extra_hosts` di `docker-compose.yml` ter-set ke `host-gateway` (sudah di-set default) |
+| UFW/iptables blokir docker bridge | `sudo ufw allow from 172.17.0.0/16 to any port 3306` |
+| MySQL listen di port custom | Set `DB_PORT=` ke port yang benar di `.env.docker` |
 
-### `app` jalan tapi browser hang / `502`
+Test manual dari container:
+
+```bash
+docker compose exec migrate sh -c "nc -zv host.docker.internal 3306"
+```
+
+### B. `migrate` lewat TCP probe tapi `prisma db push` gagal
+
+```
+Authentication failed against database server
+```
+
+→ password di `DATABASE_URL_INTERNAL` salah, atau user belum di-grant
+ke host yang benar. Re-run grant SQL di section 2.1.
+
+```
+Unknown database 'maybe_finance'
+```
+
+→ Database belum ada. Jalankan `CREATE DATABASE maybe_finance...` di
+MySQL dulu (Prisma `db push` membuat tabel tapi tidak membuat database).
+
+### C. Skenario C: `db` tidak start
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml \
+  logs db
+```
+
+Penyebab umum: `MYSQL_PASSWORD` atau `MYSQL_ROOT_PASSWORD` belum di-set
+di `.env.docker`. Compose akan refuse start dengan pesan eksplisit.
+
+### D. `app` jalan tapi browser hang / `502`
 
 ```bash
 docker compose logs --tail 50 app
 ```
 
-- `Error: Invalid environment variables` → `.env.docker` belum lengkap. Lihat langkah 2.
-- `EADDRINUSE 0.0.0.0:3000` → port 3000 sudah dipakai proses lain di host. Ganti `APP_PORT`.
-- `PrismaClientInitializationError` → DB belum ready. Lihat poin di atas.
+- `Error: Invalid environment variables` → `.env.docker` belum lengkap
+- `EADDRINUSE 0.0.0.0:3000` → port 3000 dipakai. Ganti `APP_PORT`
+- `PrismaClientInitializationError` → DB tidak reachable runtime. Cek
+  bahwa `app` masih bisa connect ke `DB_HOST` (firewall / DNS)
 
-### Port 3000 bentrok dengan proses lain
+### E. Wipe semua dan mulai dari nol
 
-```bash
-# Linux/Mac
-lsof -i :3000
-
-# Windows (PowerShell)
-netstat -ano | findstr :3000
-```
-
-Ubah `APP_PORT` di `.env.docker`, lalu:
+> ⚠️ Skenario C: ini menghapus database secara permanen.
 
 ```bash
-docker compose --env-file .env.docker up -d
-```
+# Skenario A/B
+docker compose down
+rm -f .env.docker
 
-### Mau wipe semua dan mulai dari nol
-
-> ⚠️ Ini menghapus database secara permanen.
-
-```bash
-docker compose down -v          # -v ikut hapus volume
+# Skenario C (ikut hapus volume database)
+docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml down -v
 rm -f .env.docker
 ```
 
-### Image image lama menumpuk
-
-```bash
-docker image prune -f                          # buang dangling
-docker image prune -a -f --filter until=168h   # buang yang tidak terpakai > 7 hari
-```
-
 ---
 
-## 9. Struktur file Docker
-
-```
-maybe-finance/
-├── Dockerfile               # Multi-stage: deps → builder → runner
-├── .dockerignore            # File yang TIDAK ikut ke build context
-├── docker-compose.yml       # Orkestrasi 3 service (db, migrate, app)
-├── .env.docker.example      # Template env, COPY dulu sebelum edit
-├── .env.docker              # File env sebenarnya (gitignored)
-└── docker/
-    └── entrypoint.sh        # Script container migrate (wait DB → push schema)
-```
-
-Gambaran multi-stage `Dockerfile`:
-
-| Stage | Tujuan | Image base |
-|---|---|---|
-| `deps` | `npm ci` cached | `node:22-alpine` |
-| `builder` | `prisma generate` + `next build` standalone | `node:22-alpine` |
-| `runner` | Hanya `.next/standalone` + static + public | `node:22-alpine` + `tini` |
-
-Image akhir `runner` ~150MB (vs ~500MB+ kalau bawa devDependencies).
-
----
-
-## 10. Cara cepat (cheat sheet)
+## 11. Cheat sheet
 
 ```bash
-# Setup pertama kali
-cp .env.docker.example .env.docker
-# edit .env.docker (set AUTH_SECRET + password DB)
+# === Skenario A/B (MySQL eksternal) ===
 docker compose --env-file .env.docker up -d --build
-
-# Lihat status
 docker compose ps
 docker compose logs -f app
-
-# Restart aja (tanpa rebuild)
-docker compose --env-file .env.docker up -d
-
-# Update dari git
-git pull && docker compose --env-file .env.docker up -d --build
-
-# Backup DB
-docker compose exec db mysqldump -u maybe -p"$MYSQL_PASSWORD" maybe_finance > backup.sql
-
-# Stop
 docker compose down
 
-# Wipe semua (HATI-HATI: hapus DB)
-docker compose down -v
+# === Skenario C (MySQL bundled) ===
+docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml \
+  --env-file .env.docker up -d --build
+
+# Test koneksi DB dari container
+docker compose exec migrate sh -c "nc -zv $DB_HOST $DB_PORT"
+
+# Run prisma studio (sementara)
+docker compose exec migrate npx prisma studio
+
+# Backup (Skenario A/B - lewat host)
+mysqldump -h <DB_HOST> -u maybe -p maybe_finance > backup.sql
+
+# Backup (Skenario C - lewat compose)
+docker compose -f docker-compose.yml -f docker-compose.bundled-db.yml \
+  exec db mysqldump -u maybe -p"$MYSQL_PASSWORD" maybe_finance > backup.sql
 ```

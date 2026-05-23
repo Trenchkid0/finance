@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import {
   Check,
@@ -120,6 +120,39 @@ export function BudgetClient({
     }
     navigateToMonth(y, m);
   }
+
+  // Keyboard shortcut: panah kiri/kanan untuk geser bulan. Skip kalau
+  // user sedang fokus di input (mis. edit limit budget) atau pakai
+  // modifier (Cmd+arrow → browser navigation).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        shiftMonth(-1);
+      } else if (e.key === "ArrowRight") {
+        // Cegah maju ke masa depan.
+        const now = new Date();
+        if (year === now.getFullYear() && month >= now.getMonth() + 1) return;
+        e.preventDefault();
+        shiftMonth(1);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // shiftMonth sengaja tidak di-deps — closure-nya capture year/month
+    // terbaru via re-render. Pakai eslint-disable supaya konsisten.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, month]);
 
   return (
     <div className="space-y-6">

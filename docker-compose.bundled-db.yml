@@ -1,0 +1,80 @@
+# =============================================================================
+# Overlay opsional — bundle MySQL 8.4 ke dalam stack.
+#
+# Pakai HANYA kalau Anda tidak punya MySQL terinstal di host atau
+# server lain. Kalau Anda sudah punya MySQL native, JANGAN aktifkan
+# overlay ini — gunakan docker-compose.yml utama saja dan arahkan
+# `DATABASE_URL_INTERNAL` ke MySQL eksternal Anda.
+#
+# Cara pakai:
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.bundled-db.yml \
+#     --env-file .env.docker \
+#     up -d --build
+#
+# Saat overlay ini aktif, set di .env.docker:
+#   DATABASE_URL_INTERNAL=mysql://maybe:passwordmu@db:3306/maybe_finance
+#   DB_HOST=db
+#   MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD wajib diisi.
+# =============================================================================
+
+services:
+  db:
+    image: mysql:8.4
+    container_name: maybe-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-maybe_finance}
+      MYSQL_USER: ${MYSQL_USER:-maybe}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD di .env.docker}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD di .env.docker}
+    volumes:
+      - maybe-db-data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "127.0.0.1",
+          "-u",
+          "root",
+          "-p${MYSQL_ROOT_PASSWORD}",
+          "--silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - maybe-net
+    # Default port 3306 sengaja TIDAK dipublish ke host. Buka kalau
+    # perlu akses dari workbench/DBeaver di host.
+    # ports:
+    #   - "3306:3306"
+
+  # `migrate` perlu menunggu `db` healthy hanya saat overlay aktif.
+  # Tanpa overlay, `migrate` langsung lari probe TCP via entrypoint.
+  # Override DB_HOST ke `db` agar TCP probe entrypoint mengarah ke
+  # service compose (bukan host.docker.internal default), tidak peduli
+  # apa yang ada di .env.docker — mencegah misconfig saat overlay aktif.
+  migrate:
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+
+  # `app` juga ikut menunggu DB healthy untuk first start.
+  app:
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  maybe-db-data:
+    driver: local

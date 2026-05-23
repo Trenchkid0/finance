@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { NetWorthHero, type NetWorthPoint, type NetWorthPeriod } from "@/components/dashboard/NetWorthHero";
+import { OnboardingHero } from "@/components/dashboard/OnboardingHero";
 import {
   BalanceSheet,
   type BalanceGroup,
@@ -46,6 +47,16 @@ export default async function DashboardPage({
     session!.user.name?.trim().split(" ")[0] ??
     session!.user.email?.split("@")[0] ??
     "kamu";
+
+  // First-time user — belum punya akun aktif. Tampilkan onboarding
+  // dulu sebelum dashboard "kosong" yang membingungkan.
+  const accountsCount = await prisma.financeAccount.count({
+    where: { userId, isActive: true },
+  });
+
+  if (accountsCount === 0) {
+    return <OnboardingHero userName={capitalize(userName)} />;
+  }
 
   const [
     accounts,

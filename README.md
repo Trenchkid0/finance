@@ -42,23 +42,26 @@ See [`AGENTS.md`](../AGENTS.md) §8 — single source of truth for project state
 
 ## Deploy via Docker Compose
 
-Stack siap pakai: MySQL 8.4 + Next.js standalone + one-shot migrate job.
+Stack siap pakai dengan **3 skenario** koneksi database:
 
-**Cara cepat:**
+- **A. MySQL native di host yang sama** dengan Docker (default)
+- **B. MySQL di server lain** (LAN/VPN/cloud-managed)
+- **C. MySQL ikut bundled** lewat compose overlay (kalau belum punya MySQL)
+
+**Cara cepat (skenario A — paling umum):**
 
 ```bash
 cp .env.docker.example .env.docker
 # edit .env.docker — minimal isi:
 #   AUTH_SECRET (generate: openssl rand -base64 32)
-#   MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD
-#   DATABASE_URL_INTERNAL (sinkronkan password dengan MYSQL_PASSWORD)
+#   DATABASE_URL_INTERNAL → mysql://user:pass@host.docker.internal:3306/maybe_finance
 docker compose --env-file .env.docker up -d --build
 ```
 
 App jalan di `http://localhost:3000` (atau `APP_PORT` yang di-set).
 
-**Panduan lengkap step-by-step**, termasuk troubleshooting, backup/restore,
-dan production hardening:
+**Panduan lengkap step-by-step**, termasuk konfigurasi MySQL host, koneksi
+ke server lain, troubleshooting, backup/restore, dan production hardening:
 
 📘 [`docs/DEPLOY.md`](./docs/DEPLOY.md)
 
