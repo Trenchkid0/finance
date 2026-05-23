@@ -3,9 +3,14 @@
 @tailwind utilities;
 
 /*
- * AGENTS.md §4 — Modern Dark Theme. The full canvas is dark by default;
- * `darkMode: "class"` in tailwind.config keeps the option open for a
- * future light theme without rewrites.
+ * AGENTS.md §4 — Modern Dark Theme.
+ *
+ * Background: #0D1117 (canvas). No ambient glow — §4.1 demands
+ * "clarity over cleverness", and ambient gradients fight chart
+ * legibility for zero ergonomic gain.
+ *
+ * Glassmorphism is reserved for sticky/fixed nav per §4.8. The Topbar
+ * applies it inline; no global helper class needed.
  */
 :root {
   color-scheme: dark;
@@ -13,8 +18,9 @@
 
 html,
 body {
-  background-color: #0d1117; /* canvas — §4.2 */
-  color: #f0f6fc; /* text-primary — §4.2 */
+  background-color: #0D1117;
+  color: #F0F6FC;
+  min-height: 100vh;
 }
 
 /* Tabular numerals everywhere money lives.
@@ -23,18 +29,19 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Subtle scrollbar to match canvas without competing for attention. */
+/* Subtle scrollbar — same neutral as borders. */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #0d1117;
+  background: #0D1117;
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
-  border-radius: 3px;
+  background: #21262D;
+  border: 2px solid #0D1117;
+  border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #444c56;
+  background: #30363D;
 }

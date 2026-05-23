@@ -1,18 +1,60 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { Pencil, Plus, Trash2, Search } from "lucide-react";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import {
+  ArrowLeftRight,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Copy,
+  Download,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  Wallet,
+} from "lucide-react";
+import { toast } from "sonner";
+
 import { deleteTransaction } from "@/app/actions/transactions";
 import { formatDateShort, formatIDR } from "@/lib/utils/formatters";
-import { Modal } from "@/components/ui/Modal";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   TransactionForm,
   type AccountOption,
   type CategoryOption,
   type TransactionFormInitial,
 } from "./TransactionForm";
-import { toast } from "sonner";
-import { subDays, startOfMonth, startOfYear, isAfter } from "date-fns";
 
 export interface TransactionRowData {
   id: string;
@@ -25,349 +67,787 @@ export interface TransactionRowData {
   transferToId: string | null;
   transferToName: string | null;
   amount: number;
-  date: string; // ISO
+  date: string;
   description: string | null;
   note: string | null;
+}
+
+export interface TransactionFiltersState {
+  q: string;
+  type: "all" | "income" | "expense" | "transfer";
+  accountId: string;
+  categoryId: string;
+  /** YYYY-MM-DD; empty string means "no filter". */
+  startDate: string;
+  endDate: string;
+}
+
+export interface TransactionPagination {
+  page: number;
+  pageSize: number;
+  pageSizeOptions: number[];
+  total: number;
+  totalPages: number;
+}
+
+export interface TransactionSummary {
+  total: number;
+  income: number;
+  expense: number;
 }
 
 interface Props {
   transactions: TransactionRowData[];
   accounts: AccountOption[];
   categories: CategoryOption[];
+  filters: TransactionFiltersState;
+  pagination: TransactionPagination;
+  summary: TransactionSummary;
+  /** True kalau DEEPSEEK_API_KEY ter-set di server. */
+  aiScanEnabled: boolean;
 }
 
-type DateRangeFilter = "all" | "30days" | "month" | "year";
-
-export function TransactionsClient({ transactions, accounts, categories }: Props) {
+export function TransactionsClient({
+  transactions,
+  accounts,
+  categories,
+  filters,
+  pagination,
+  summary,
+  aiScanEnabled,
+}: Props) {
   const [editing, setEditing] = useState<TransactionRowData | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<TransactionFormInitial | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<TransactionRowData | null>(null);
-
-  // Filters state
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [accountFilter, setAccountFilter] = useState<string>("all");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [dateFilter, setDateFilter] = useState<DateRangeFilter>("all");
+  const searchParams = useSearchParams();
 
   const canCreate = accounts.length > 0;
 
-  // Filter logic
-  const filteredTransactions = transactions.filter((tx) => {
-    // 1. Text Search
-    if (search.trim()) {
-      const query = search.toLowerCase();
-      const descMatch = tx.description?.toLowerCase().includes(query);
-      const catMatch = tx.categoryName?.toLowerCase().includes(query);
-      const accMatch = tx.accountName.toLowerCase().includes(query);
-      if (!descMatch && !catMatch && !accMatch) return false;
-    }
+  function startCreate() {
+    setCreating(blankInitial(accounts[0]?.id ?? ""));
+  }
 
-    // 2. Type Filter
-    if (typeFilter !== "all" && tx.type !== typeFilter) return false;
+  function startDuplicate(row: TransactionRowData) {
+    // Pre-fill semua field tapi reset tanggal ke hari ini supaya
+    // duplikasi cocok untuk skenario "bayar Netflix tiap bulan".
+    setCreating({
+      type: row.type,
+      accountId: row.accountId,
+      categoryId: row.categoryId,
+      transferToId: row.transferToId,
+      amount: row.amount,
+      date: todayLocalISO(),
+      description: row.description ?? "",
+      note: row.note ?? "",
+    });
+  }
 
-    // 3. Account Filter
-    if (accountFilter !== "all" && tx.accountId !== accountFilter && tx.transferToId !== accountFilter) return false;
-
-    // 4. Category Filter
-    if (categoryFilter !== "all" && tx.categoryId !== categoryFilter) return false;
-
-    // 5. Date Range Filter
-    const txDate = new Date(tx.date);
-    const now = new Date();
-    if (dateFilter === "30days") {
-      const thirtyDaysAgo = subDays(now, 30);
-      if (!isAfter(txDate, thirtyDaysAgo)) return false;
-    } else if (dateFilter === "month") {
-      const firstOfMonth = startOfMonth(now);
-      if (!isAfter(txDate, firstOfMonth)) return false;
-    } else if (dateFilter === "year") {
-      const firstOfYear = startOfYear(now);
-      if (!isAfter(txDate, firstOfYear)) return false;
-    }
-
-    return true;
-  });
+  function exportHref(): string {
+    const qs = searchParams.toString();
+    return qs ? `/transactions/export?${qs}` : "/transactions/export";
+  }
 
   return (
-    <>
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
+    <div className="space-y-4">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold text-text-primary mb-1">
+          <h1 className="text-3xl font-semibold text-foreground mb-1">
             Transaksi
           </h1>
-          <p className="text-sm text-text-muted">
-            Semua pemasukan, pengeluaran, dan transfer rekening Anda.
+          <p className="text-sm text-muted-foreground">
+            Kelola dan telusuri pemasukan, pengeluaran, dan transfer.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setCreating(true)}
-          disabled={!canCreate}
-          title={canCreate ? undefined : "Tambahkan akun terlebih dahulu"}
-          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm bg-accent text-white hover:bg-blue-500 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed font-medium self-start md:self-auto"
-        >
-          <Plus size={14} />
-          Tambah Transaksi
-        </button>
-      </div>
-
-      {/* Filter and Search Bar */}
-      <div className="bg-surface border border-border rounded-lg p-4 mb-6 space-y-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-2.5 text-text-muted shrink-0" size={16} />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Cari berdasarkan deskripsi, kategori, atau akun..."
-            className="w-full bg-elevated border border-border rounded-md pl-10 pr-4 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all duration-200"
-          />
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {/* Type Filter */}
-          <div>
-            <label className="block text-[10px] text-text-muted uppercase tracking-wider mb-1 font-medium">Tipe</label>
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-              className="w-full bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <option value="all">Semua Tipe</option>
-              <option value="expense">Pengeluaran</option>
-              <option value="income">Pemasukan</option>
-              <option value="transfer">Transfer</option>
-            </select>
-          </div>
-
-          {/* Account Filter */}
-          <div>
-            <label className="block text-[10px] text-text-muted uppercase tracking-wider mb-1 font-medium">Akun</label>
-            <select
-              value={accountFilter}
-              onChange={(e) => setAccountFilter(e.target.value)}
-              className="w-full bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <option value="all">Semua Akun</option>
-              {accounts.map((acc) => (
-                <option key={acc.id} value={acc.id}>
-                  {acc.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Category Filter */}
-          <div>
-            <label className="block text-[10px] text-text-muted uppercase tracking-wider mb-1 font-medium">Kategori</label>
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="w-full bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <option value="all">Semua Kategori</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.icon ? `${cat.icon} ` : ""}{cat.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Date Filter */}
-          <div>
-            <label className="block text-[10px] text-text-muted uppercase tracking-wider mb-1 font-medium">Waktu</label>
-            <select
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value as DateRangeFilter)}
-              className="w-full bg-elevated border border-border rounded-md px-2.5 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-            >
-              <option value="all">Semua Waktu</option>
-              <option value="30days">30 Hari Terakhir</option>
-              <option value="month">Bulan Ini</option>
-              <option value="year">Tahun Ini</option>
-            </select>
-          </div>
+        <div className="flex items-center gap-2">
+          <Button asChild variant="secondary" size="sm" title="Unduh CSV">
+            <a href={exportHref()} download>
+              <Download size={14} />
+              Export
+            </a>
+          </Button>
+          <Button
+            onClick={startCreate}
+            disabled={!canCreate}
+            size="sm"
+            title={canCreate ? undefined : "Tambahkan akun terlebih dahulu"}
+          >
+            <Plus size={14} />
+            Tambah transaksi
+          </Button>
         </div>
       </div>
 
-      {filteredTransactions.length === 0 ? (
-        <EmptyState onAdd={() => setCreating(true)} disabled={!canCreate} isFiltered={transactions.length > 0} />
-      ) : (
-        <>
-          {/* Desktop Table View */}
-          <div className="hidden md:block bg-surface border border-border rounded-lg overflow-hidden">
-            <table className="w-full">
-              <thead className="bg-elevated">
-                <tr className="text-xs font-medium text-text-muted uppercase tracking-wider">
-                  <th className="text-left px-6 py-3">Tanggal</th>
-                  <th className="text-left px-6 py-3">Deskripsi</th>
-                  <th className="text-left px-6 py-3">Akun</th>
-                  <th className="text-right px-6 py-3">Jumlah</th>
-                  <th className="px-6 py-3 w-20" aria-label="Aksi" />
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTransactions.map((tx) => (
-                  <tr
-                    key={tx.id}
-                    className="border-b border-border last:border-b-0 hover:bg-elevated/50 transition-colors duration-150"
-                  >
-                    <td className="px-6 py-3 text-xs text-text-muted whitespace-nowrap font-mono tabular-nums">
-                      {formatDateShort(tx.date)}
-                    </td>
-                    <td className="px-6 py-3">
-                      <p className="text-sm font-medium text-text-primary">
-                        {tx.description ?? tx.categoryName ?? "Transaksi"}
-                      </p>
-                      <p className="text-xs text-text-muted flex items-center gap-1">
-                        {tx.categoryIcon && <span>{tx.categoryIcon}</span>}
-                        {tx.type === "transfer"
-                          ? `Transfer → ${tx.transferToName ?? "?"}`
-                          : tx.categoryName ?? "Tanpa kategori"}
-                      </p>
-                    </td>
-                    <td className="px-6 py-3 text-sm text-text-muted">
-                      {tx.accountName}
-                    </td>
-                    <td
-                      className={`px-6 py-3 text-sm font-mono tabular-nums text-right whitespace-nowrap font-semibold ${amountClass(tx.type)}`}
-                    >
-                      {amountPrefix(tx.type)}
-                      {formatIDR(tx.amount)}
-                    </td>
-                    <td className="px-3 py-3">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setEditing(tx)}
-                          aria-label="Ubah"
-                          className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-canvas transition-colors duration-150"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDelete(tx)}
-                          aria-label="Hapus"
-                          className="p-1.5 rounded-md text-text-muted hover:text-expense hover:bg-canvas transition-colors duration-150"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {/* 3-stat summary card — refleksif terhadap filter aktif */}
+      <div className="grid grid-cols-1 md:grid-cols-3 rounded-xl border border-border bg-card divide-y md:divide-y-0 md:divide-x divide-border">
+        <div className="p-4 space-y-1">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+            Total transaksi
+          </p>
+          <p className="text-xl font-medium font-mono tabular-nums text-foreground">
+            {summary.total}
+          </p>
+        </div>
+        <div className="p-4 space-y-1">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+            Pemasukan
+          </p>
+          <p className="text-xl font-medium font-mono tabular-nums text-income">
+            {formatIDR(summary.income)}
+          </p>
+        </div>
+        <div className="p-4 space-y-1">
+          <p className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+            Pengeluaran
+          </p>
+          <p className="text-xl font-medium font-mono tabular-nums text-expense">
+            {formatIDR(summary.expense)}
+          </p>
+        </div>
+      </div>
 
-          {/* Mobile Stacked List View */}
-          <div className="md:hidden space-y-2">
-            {filteredTransactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-2 hover:border-[#444C56] transition-all duration-200"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-text-primary truncate">
-                      {tx.description ?? tx.categoryName ?? "Transaksi"}
-                    </p>
-                    <p className="text-xs text-text-muted flex items-center gap-1 mt-0.5 truncate">
-                      {tx.categoryIcon && <span className="scale-90">{tx.categoryIcon}</span>}
-                      <span>
-                        {tx.type === "transfer"
-                          ? `${tx.accountName} ➔ ${tx.transferToName ?? "?"}`
-                          : tx.categoryName ?? "Tanpa kategori"}
-                      </span>
-                    </p>
-                  </div>
-                  <span
-                    className={`text-sm font-mono tabular-nums font-semibold whitespace-nowrap ${amountClass(tx.type)}`}
-                  >
-                    {amountPrefix(tx.type)}
-                    {formatIDR(tx.amount)}
-                  </span>
-                </div>
+      <FilterBar
+        filters={filters}
+        accounts={accounts}
+        categories={categories}
+      />
 
-                <div className="flex items-center justify-between border-t border-border/50 pt-2 mt-1">
-                  <span className="text-[10px] text-text-muted font-mono tabular-nums">
-                    {formatDateShort(tx.date)} · {tx.accountName}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditing(tx)}
-                      aria-label="Ubah"
-                      className="p-1 rounded bg-elevated text-text-muted hover:text-text-primary"
-                    >
-                      <Pencil size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmDelete(tx)}
-                      aria-label="Hapus"
-                      className="p-1 rounded bg-elevated text-text-muted hover:text-expense"
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+      <TransactionsList
+        transactions={transactions}
+        onEdit={setEditing}
+        onDelete={setConfirmDelete}
+        onDuplicate={startDuplicate}
+        emptyState={
+          isFilterActive(filters) ? (
+            <EmptyState
+              icon={Search}
+              title="Tidak ada transaksi cocok"
+              description="Coba ubah kata kunci atau reset filter."
+              size="sm"
+            />
+          ) : (
+            <EmptyState
+              icon={Wallet}
+              title="Belum ada transaksi"
+              description={
+                canCreate
+                  ? "Catat transaksi pertama Anda untuk mulai melacak arus kas."
+                  : "Tambahkan akun terlebih dahulu untuk mencatat transaksi."
+              }
+              action={
+                canCreate ? (
+                  <Button size="sm" onClick={startCreate}>
+                    <Plus size={12} />
+                    Tambah transaksi
+                  </Button>
+                ) : null
+              }
+              size="sm"
+            />
+          )
+        }
+      />
 
-      {/* Create modal */}
-      <Modal
-        open={creating}
-        onClose={() => setCreating(false)}
-        title="Tambah Transaksi Baru"
+      <PaginationBar pagination={pagination} />
+
+      {/* Create / Duplicate */}
+      <Dialog
+        open={creating !== null}
+        onOpenChange={(open) => !open && setCreating(null)}
       >
-        <TransactionForm
-          mode="create"
-          initial={blankInitial(accounts[0]?.id ?? "")}
-          accounts={accounts}
-          categories={categories}
-          onSuccess={() => setCreating(false)}
-          onCancel={() => setCreating(false)}
-        />
-      </Modal>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Tambah transaksi</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            {creating ? (
+              <TransactionForm
+                mode="create"
+                initial={creating}
+                accounts={accounts}
+                categories={categories}
+                aiScanEnabled={aiScanEnabled}
+                onSuccess={() => setCreating(null)}
+                onCancel={() => setCreating(null)}
+              />
+            ) : null}
+          </DialogBody>
+        </DialogContent>
+      </Dialog>
 
-      {/* Edit modal */}
-      <Modal
+      {/* Edit */}
+      <Dialog
         open={editing !== null}
-        onClose={() => setEditing(null)}
-        title="Ubah Transaksi"
+        onOpenChange={(open) => !open && setEditing(null)}
       >
-        {editing ? (
-          <TransactionForm
-            mode="edit"
-            initial={toFormInitial(editing)}
-            accounts={accounts}
-            categories={categories}
-            onSuccess={() => setEditing(null)}
-            onCancel={() => setEditing(null)}
-          />
-        ) : null}
-      </Modal>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Ubah transaksi</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            {editing ? (
+              <TransactionForm
+                mode="edit"
+                initial={toFormInitial(editing)}
+                accounts={accounts}
+                categories={categories}
+                onSuccess={() => setEditing(null)}
+                onCancel={() => setEditing(null)}
+              />
+            ) : null}
+          </DialogBody>
+        </DialogContent>
+      </Dialog>
 
-      {/* Delete confirmation */}
       <ConfirmDelete
         target={confirmDelete}
         onClose={() => setConfirmDelete(null)}
       />
-    </>
+    </div>
+  );
+}
+
+// --- URL-state helpers ---------------------------------------------------
+
+/**
+ * Build a new search-param string from the current one + a partial
+ * patch. `null`/`undefined` removes the key. Always resets `page` to 1
+ * when any filter (other than page itself) changes.
+ */
+function withParams(
+  current: URLSearchParams,
+  patch: Record<string, string | null | undefined>,
+): string {
+  const next = new URLSearchParams(current);
+  let changedNonPage = false;
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null || value === undefined || value === "" || value === "all") {
+      next.delete(key);
+    } else {
+      next.set(key, value);
+    }
+    if (key !== "page" && key !== "pageSize") changedNonPage = true;
+  }
+  // Reset page when filter changes unless caller explicitly set page.
+  if (changedNonPage && !("page" in patch)) {
+    next.delete("page");
+  }
+  return next.toString();
+}
+
+// --- Filter bar ----------------------------------------------------------
+
+function FilterBar({
+  filters,
+  accounts,
+  categories,
+}: {
+  filters: TransactionFiltersState;
+  accounts: AccountOption[];
+  categories: CategoryOption[];
+}) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [pending, startTransition] = useTransition();
+
+  function pushFilter(patch: Record<string, string | null | undefined>) {
+    const qs = withParams(searchParams, patch);
+    startTransition(() => router.push(qs ? `${pathname}?${qs}` : pathname));
+  }
+
+  const active = isFilterActive(filters);
+
+  return (
+    <form
+      action=""
+      onSubmit={(e) => {
+        e.preventDefault();
+        const fd = new FormData(e.currentTarget);
+        pushFilter({
+          q: (fd.get("q") as string) ?? "",
+          startDate: (fd.get("startDate") as string) || null,
+          endDate: (fd.get("endDate") as string) || null,
+        });
+      }}
+      className="flex flex-col gap-3 rounded-lg border border-border bg-card p-3"
+    >
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        {/* Search */}
+        <div className="relative flex-1">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            name="q"
+            defaultValue={filters.q}
+            placeholder="Cari deskripsi atau catatan..."
+            className="pl-9"
+            aria-label="Cari transaksi"
+          />
+        </div>
+
+        {/* Filters */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 lg:flex lg:items-center">
+          <FilterSelect
+            label="Tipe"
+            value={filters.type}
+            onChange={(v) => pushFilter({ type: v })}
+            options={[
+              { value: "all", label: "Semua tipe" },
+              { value: "income", label: "Pemasukan" },
+              { value: "expense", label: "Pengeluaran" },
+              { value: "transfer", label: "Transfer" },
+            ]}
+          />
+          <FilterSelect
+            label="Akun"
+            value={filters.accountId}
+            onChange={(v) => pushFilter({ accountId: v })}
+            options={[
+              { value: "all", label: "Semua akun" },
+              ...accounts.map((a) => ({ value: a.id, label: a.name })),
+            ]}
+          />
+          <FilterSelect
+            label="Kategori"
+            value={filters.categoryId}
+            onChange={(v) => pushFilter({ categoryId: v })}
+            options={[
+              { value: "all", label: "Semua kategori" },
+              { value: "none", label: "Tanpa kategori" },
+              ...categories.map((c) => ({
+                value: c.id,
+                label: `${c.icon ? `${c.icon} ` : ""}${c.name}`,
+              })),
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* Date range + actions row */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <span className="text-xs text-muted-foreground">Rentang tanggal</span>
+          <div className="flex items-center gap-1.5">
+            <Input
+              type="date"
+              name="startDate"
+              defaultValue={filters.startDate}
+              max={filters.endDate || undefined}
+              className="h-8 text-xs w-36"
+              aria-label="Tanggal mulai"
+            />
+            <span className="text-muted-foreground text-xs">→</span>
+            <Input
+              type="date"
+              name="endDate"
+              defaultValue={filters.endDate}
+              min={filters.startDate || undefined}
+              className="h-8 text-xs w-36"
+              aria-label="Tanggal akhir"
+            />
+          </div>
+          <DateRangePresets
+            onPick={(range) =>
+              pushFilter({
+                startDate: range.start,
+                endDate: range.end,
+              })
+            }
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button type="submit" size="sm" disabled={pending}>
+            Terapkan
+          </Button>
+          {active ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={pending}
+              onClick={() =>
+                pushFilter({
+                  q: null,
+                  type: null,
+                  accountId: null,
+                  categoryId: null,
+                  startDate: null,
+                  endDate: null,
+                })
+              }
+            >
+              Reset
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </form>
+  );
+}
+
+// --- Date range presets --------------------------------------------------
+
+interface DateRange {
+  start: string;
+  end: string;
+}
+
+function DateRangePresets({ onPick }: { onPick: (r: DateRange) => void }) {
+  const today = new Date();
+  const isoToday = isoFromDate(today);
+
+  function preset(label: string, range: DateRange) {
+    return (
+      <button
+        key={label}
+        type="button"
+        onClick={() => onPick(range)}
+        className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {label}
+      </button>
+    );
+  }
+
+  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const startOfPrevMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const endOfPrevMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+  const last7 = new Date(today);
+  last7.setDate(last7.getDate() - 6);
+  const last30 = new Date(today);
+  last30.setDate(last30.getDate() - 29);
+
+  return (
+    <div className="flex items-center gap-3 flex-wrap">
+      {preset("Hari ini", { start: isoToday, end: isoToday })}
+      {preset("7 hari", { start: isoFromDate(last7), end: isoToday })}
+      {preset("30 hari", { start: isoFromDate(last30), end: isoToday })}
+      {preset("Bulan ini", { start: isoFromDate(startOfMonth), end: isoToday })}
+      {preset("Bulan lalu", {
+        start: isoFromDate(startOfPrevMonth),
+        end: isoFromDate(endOfPrevMonth),
+      })}
+    </div>
+  );
+}
+
+function isoFromDate(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+interface FilterSelectOption {
+  value: string;
+  label: string;
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: FilterSelectOption[];
+}) {
+  return (
+    <div className="grid gap-1.5 sm:gap-1">
+      <Label className="sr-only">{label}</Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label={label}>
+          <SelectValue placeholder={label} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+// --- List (grouped by date) ---------------------------------------------
+
+/**
+ * Transaction list — pola Maybe Finance asli.
+ *
+ *   ┌─ MAY 16, 2026 · 2 ───────────── -Rp 310.000 ─┐
+ *   │ ┌────────────────────────────────────────┐  │
+ *   │ │ ⓣ Top Up Shopeepay  [Shopping]   -290k │  │
+ *   │ │   BNI                                  │  │
+ *   │ ├────────────────────────────────────────┤  │
+ *   │ │ ⓑ Bakmi Resto Rio   [Food]       -20k │  │
+ *   │ │   Jago                                 │  │
+ *   │ └────────────────────────────────────────┘  │
+ *   └─────────────────────────────────────────────┘
+ *
+ * Group total mempermudah scanning harian — user langsung lihat hari
+ * mana paling boros tanpa harus jumlahkan sendiri.
+ */
+function TransactionsList({
+  transactions,
+  onEdit,
+  onDelete,
+  onDuplicate,
+  emptyState,
+}: {
+  transactions: TransactionRowData[];
+  onEdit: (row: TransactionRowData) => void;
+  onDelete: (row: TransactionRowData) => void;
+  onDuplicate: (row: TransactionRowData) => void;
+  emptyState: React.ReactNode;
+}) {
+  if (transactions.length === 0) {
+    return (
+      <div className="rounded-xl border border-border bg-card">
+        {emptyState}
+      </div>
+    );
+  }
+
+  const groups = groupByDate(transactions);
+
+  return (
+    <div className="space-y-4">
+      {/* Column header — desktop only */}
+      <div className="hidden md:grid grid-cols-12 px-5 py-3 text-xs uppercase font-medium text-muted-foreground tracking-wider">
+        <span className="col-span-7">Transaksi</span>
+        <span className="col-span-3">Kategori</span>
+        <span className="col-span-2 text-right">Jumlah</span>
+      </div>
+
+      <div className="space-y-4">
+        {groups.map((group) => (
+          <DateGroup
+            key={group.date}
+            group={group}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onDuplicate={onDuplicate}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface TransactionGroup {
+  date: string;
+  label: string;
+  total: number;
+  items: TransactionRowData[];
+}
+
+function groupByDate(rows: TransactionRowData[]): TransactionGroup[] {
+  const buckets = new Map<string, TransactionRowData[]>();
+  for (const tx of rows) {
+    const key = tx.date.slice(0, 10);
+    const list = buckets.get(key) ?? [];
+    list.push(tx);
+    buckets.set(key, list);
+  }
+
+  // Sudah ter-sort di server (date desc, createdAt desc) — kita preserve
+  // urutan dengan iterate ulang dari rows, bukan dari Map keys yang
+  // tidak garansi insertion order setelah delete.
+  const seen = new Set<string>();
+  const ordered: TransactionGroup[] = [];
+  for (const tx of rows) {
+    const key = tx.date.slice(0, 10);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const items = buckets.get(key)!;
+    ordered.push({
+      date: key,
+      label: formatGroupDate(key),
+      total: items.reduce((sum, t) => sum + signedAmount(t), 0),
+      items,
+    });
+  }
+  return ordered;
+}
+
+function signedAmount(tx: TransactionRowData): number {
+  if (tx.type === "income") return tx.amount;
+  if (tx.type === "expense") return -tx.amount;
+  return 0; // transfer netral terhadap net worth
+}
+
+function formatGroupDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString("id-ID", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function DateGroup({
+  group,
+  onEdit,
+  onDelete,
+  onDuplicate,
+}: {
+  group: TransactionGroup;
+  onEdit: (row: TransactionRowData) => void;
+  onDelete: (row: TransactionRowData) => void;
+  onDuplicate: (row: TransactionRowData) => void;
+}) {
+  const totalColor =
+    group.total > 0
+      ? "text-income"
+      : group.total < 0
+        ? "text-expense"
+        : "text-foreground";
+
+  return (
+    <section className="rounded-xl bg-elevated p-1">
+      <header className="flex items-center justify-between px-4 py-2 text-xs font-medium text-muted-foreground">
+        <p className="uppercase tracking-wider">
+          <span>{group.label}</span>
+          <span className="mx-1.5">·</span>
+          <span className="font-mono tabular-nums">{group.items.length}</span>
+        </p>
+        <p className={`font-mono tabular-nums ${totalColor}`}>
+          {group.total > 0 ? "+" : ""}
+          {formatIDR(group.total)}
+        </p>
+      </header>
+
+      <div className="rounded-lg bg-card border border-border divide-y divide-border">
+        {group.items.map((tx) => (
+          <TransactionRow
+            key={tx.id}
+            tx={tx}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onDuplicate={onDuplicate}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TransactionRow({
+  tx,
+  onEdit,
+  onDelete,
+  onDuplicate,
+}: {
+  tx: TransactionRowData;
+  onEdit: (row: TransactionRowData) => void;
+  onDelete: (row: TransactionRowData) => void;
+  onDuplicate: (row: TransactionRowData) => void;
+}) {
+  const initial =
+    (tx.description ?? tx.categoryName ?? "T").trim().charAt(0).toUpperCase() ||
+    "T";
+
+  return (
+    <div className="grid grid-cols-12 items-center gap-3 px-4 py-3 text-sm hover:bg-elevated/40 transition-colors duration-150">
+      {/* Avatar + description + account (col-span 7) */}
+      <div className="col-span-12 md:col-span-7 flex items-center gap-3 min-w-0">
+        <span className="size-7 rounded-full bg-elevated border border-border text-muted-foreground flex items-center justify-center text-[11px] font-medium uppercase shrink-0">
+          {initial}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-foreground font-medium truncate">
+            {tx.description ?? tx.categoryName ?? "Transaksi"}
+          </p>
+          <p className="text-xs text-muted-foreground truncate">
+            {tx.type === "transfer" ? (
+              <span className="inline-flex items-center gap-1">
+                <ArrowLeftRight size={11} />
+                Transfer · {tx.accountName} → {tx.transferToName ?? "?"}
+              </span>
+            ) : (
+              tx.accountName
+            )}
+          </p>
+        </div>
+      </div>
+
+      {/* Category badge (col-span 3) */}
+      <div className="hidden md:flex md:col-span-3 items-center min-w-0">
+        {tx.type === "transfer" ? (
+          <Badge variant="outline" className="font-normal">
+            <ArrowLeftRight size={10} />
+            Transfer
+          </Badge>
+        ) : tx.categoryName ? (
+          <Badge variant="secondary" className="font-normal truncate">
+            {tx.categoryIcon ? (
+              <span aria-hidden>{tx.categoryIcon}</span>
+            ) : null}
+            <span className="truncate">{tx.categoryName}</span>
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="font-normal">
+            Tanpa kategori
+          </Badge>
+        )}
+      </div>
+
+      {/* Amount + actions (col-span 2) */}
+      <div className="col-span-12 md:col-span-2 flex items-center justify-end gap-1">
+        <p
+          className={`font-mono tabular-nums whitespace-nowrap ${amountClass(tx.type)}`}
+        >
+          {amountPrefix(tx.type)}
+          {formatIDR(tx.amount)}
+        </p>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Opsi transaksi"
+              className="h-7 w-7"
+            >
+              <MoreHorizontal size={14} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onSelect={() => onEdit(tx)}>
+              <Pencil size={12} />
+              Ubah
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onDuplicate(tx)}>
+              <Copy size={12} />
+              Duplikasi
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => onDelete(tx)}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 size={12} />
+              Hapus
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
   );
 }
 
 function amountClass(type: "income" | "expense" | "transfer"): string {
   if (type === "income") return "text-income";
   if (type === "expense") return "text-expense";
-  return "text-text-primary";
+  return "text-foreground";
 }
 
 function amountPrefix(type: "income" | "expense" | "transfer"): string {
@@ -376,43 +856,123 @@ function amountPrefix(type: "income" | "expense" | "transfer"): string {
   return "";
 }
 
-// --- Empty state ---------------------------------------------------------
-function EmptyState({
-  onAdd,
-  disabled,
-  isFiltered,
+// --- Pagination ----------------------------------------------------------
+
+function PaginationBar({
+  pagination,
 }: {
-  onAdd: () => void;
-  disabled: boolean;
-  isFiltered: boolean;
+  pagination: TransactionPagination;
 }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [pending, startTransition] = useTransition();
+
+  const { page, pageSize, pageSizeOptions, total, totalPages } = pagination;
+
+  function go(targetPage: number) {
+    const qs = withParams(searchParams, { page: String(targetPage) });
+    startTransition(() => router.push(qs ? `${pathname}?${qs}` : pathname));
+  }
+
+  function setSize(newSize: string) {
+    const qs = withParams(searchParams, {
+      pageSize: newSize === String(25) ? null : newSize,
+      page: null,
+    });
+    startTransition(() => router.push(qs ? `${pathname}?${qs}` : pathname));
+  }
+
+  if (total === 0) return null;
+
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+
   return (
-    <div className="bg-surface border border-border rounded-lg p-16 text-center">
-      <p className="text-sm font-medium text-text-primary mb-1">
-        {isFiltered ? "Tidak ada transaksi yang cocok" : "Belum ada transaksi"}
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between text-xs text-muted-foreground">
+      <p className="tabular-nums">
+        Menampilkan{" "}
+        <span className="text-foreground font-medium">{start}</span>–
+        <span className="text-foreground font-medium">{end}</span> dari{" "}
+        <span className="text-foreground font-medium">{total}</span> transaksi
       </p>
-      <p className="text-xs text-text-muted mb-4 max-w-xs mx-auto">
-        {isFiltered
-          ? "Coba ubah kata kunci pencarian atau bersihkan filter yang terpasang."
-          : disabled
-          ? "Tambahkan akun terlebih dahulu untuk mulai mencatat transaksi."
-          : "Catat transaksi pertama Anda untuk mulai melacak arus kas keuangan."}
-      </p>
-      {!disabled && !isFiltered ? (
-        <button
-          type="button"
-          onClick={onAdd}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-accent text-white hover:bg-blue-500 transition-all duration-200 font-medium"
-        >
-          <Plus size={12} />
-          Tambah Transaksi
-        </button>
-      ) : null}
+
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <span className="hidden sm:inline">Per halaman</span>
+          <Select value={String(pageSize)} onValueChange={setSize}>
+            <SelectTrigger className="h-8 w-20" aria-label="Baris per halaman">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {pageSizeOptions.map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => go(1)}
+            disabled={pending || page <= 1}
+            aria-label="Halaman pertama"
+          >
+            <ChevronsLeft size={14} />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => go(page - 1)}
+            disabled={pending || page <= 1}
+            aria-label="Halaman sebelumnya"
+          >
+            <ChevronLeft size={14} />
+          </Button>
+          <span className="px-2 text-foreground tabular-nums">
+            {page} / {totalPages}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => go(page + 1)}
+            disabled={pending || page >= totalPages}
+            aria-label="Halaman berikutnya"
+          >
+            <ChevronRight size={14} />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => go(totalPages)}
+            disabled={pending || page >= totalPages}
+            aria-label="Halaman terakhir"
+          >
+            <ChevronsRight size={14} />
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
 
+// --- Empty state — handled inline via the `emptyState` prop using the
+// shared `EmptyState` primitive from `@/components/ui/empty-state`. ----
+
 // --- Delete confirmation -------------------------------------------------
+
 function ConfirmDelete({
   target,
   onClose,
@@ -430,56 +990,64 @@ function ConfirmDelete({
         toast.success("Transaksi berhasil dihapus");
         onClose();
       } else {
-        toast.error(result.error ?? "Gagal menghapus transaksi.");
+        toast.error(result.error ?? "Gagal menghapus transaksi");
       }
     });
   }
 
   return (
-    <Modal
-      open={target !== null}
-      onClose={onClose}
-      title="Hapus Transaksi"
-    >
-      <div className="space-y-4">
-        <p className="text-sm text-text-primary">
-          Apakah Anda yakin ingin menghapus transaksi ini? Saldo akun akan disesuaikan otomatis secara real-time.
-        </p>
-        {target ? (
-          <div className="px-3 py-2 bg-elevated border border-border rounded-md">
-            <p className="text-sm font-semibold text-text-primary">
-              {target.description ?? target.categoryName ?? "Transaksi"}
-            </p>
-            <p className="text-xs text-text-muted font-mono tabular-nums mt-0.5">
-              {formatIDR(target.amount)} · {formatDateShort(target.date)} · {target.accountName}
-            </p>
-          </div>
-        ) : null}
-
-        <div className="flex items-center gap-2 mt-5">
-          <button
-            type="button"
+    <Dialog open={target !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Hapus transaksi</DialogTitle>
+          <DialogDescription>
+            {target?.type === "transfer"
+              ? "Saldo akun sumber dan akun tujuan akan dikoreksi otomatis."
+              : "Saldo akun akan disesuaikan otomatis."}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          {target ? (
+            <div className="px-3 py-2 bg-elevated border border-border rounded-md">
+              <p className="text-sm text-foreground">
+                {target.description ?? target.categoryName ?? "Transaksi"}
+              </p>
+              <p className="text-xs text-muted-foreground font-mono tabular-nums">
+                {formatIDR(target.amount)} · {formatDateShort(target.date)}
+              </p>
+            </div>
+          ) : null}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>
+            Batal
+          </Button>
+          <Button
+            variant="destructive"
             onClick={handleConfirm}
             disabled={pending}
-            className="flex-1 px-3 py-2 rounded-md text-sm bg-expense/10 text-expense border border-expense/30 hover:bg-expense/20 transition-all duration-200 disabled:opacity-60 font-medium"
           >
-            {pending ? "Menghapus..." : "Hapus Transaksi"}
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={pending}
-            className="px-3 py-2 rounded-md text-sm bg-elevated border border-border text-text-primary hover:bg-[#2D333B] transition-all duration-200 disabled:opacity-60 font-medium"
-          >
-            Batal
-          </button>
-        </div>
-      </div>
-    </Modal>
+            {pending ? "Menghapus..." : "Hapus"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // --- Helpers -------------------------------------------------------------
+
+function isFilterActive(f: TransactionFiltersState): boolean {
+  return (
+    f.q.length > 0 ||
+    f.type !== "all" ||
+    f.accountId !== "all" ||
+    f.categoryId !== "all" ||
+    f.startDate !== "" ||
+    f.endDate !== ""
+  );
+}
+
 function blankInitial(firstAccountId: string): TransactionFormInitial {
   return {
     type: "expense",

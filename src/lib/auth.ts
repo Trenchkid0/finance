@@ -27,14 +27,48 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
       async authorize(credentials) {
         const parsed = loginSchema.safeParse(credentials);
-        if (!parsed.success) return null;
+        if (!parsed.success) {
+          // Validasi gagal — biasanya format email tidak valid atau
+          // password kosong. Kita log warn supaya gampang debug saat
+          // user lapor "tidak bisa login" — Auth.js v5 menelan detail
+          // dan cuma melempar generic "CredentialsSignin".
+          console.warn(
+            "[auth] credentials validation failed:",
+            parsed.error.flatten().fieldErrors,
+          );
+          return null;
+        }
 
         const { email, password } = parsed.data;
-        const user = await prisma.user.findUnique({ where: { email } });
-        if (!user?.password) return null;
+
+        let user;
+        try {
+          user = await prisma.user.findUnique({ where: { email } });
+        } catch (err) {
+          // Koneksi DB putus, schema belum sync, atau env DATABASE_URL
+          // salah. Pesan konkret di log container — bukan di toast user.
+          console.error("[auth] DB error saat lookup user:", err);
+          return null;
+        }
+
+        if (!user) {
+          console.warn(`[auth] user tidak ditemukan untuk email: ${email}`);
+          return null;
+        }
+
+        if (!user.password) {
+          // User dibuat lewat OAuth dan tidak pernah set password.
+          console.warn(
+            `[auth] user ${email} tidak punya password (OAuth-only?)`,
+          );
+          return null;
+        }
 
         const isValid = await bcrypt.compare(password, user.password);
-        if (!isValid) return null;
+        if (!isValid) {
+          console.warn(`[auth] password salah untuk email: ${email}`);
+          return null;
+        }
 
         return {
           id: user.id,

@@ -10,6 +10,20 @@ import {
 } from "@/lib/utils/validators";
 import type { ActionResult } from "@/types";
 
+/**
+ * Account Server Actions.
+ *
+ * Design notes:
+ *  - Balance is NOT editable directly. It moves only via transactions
+ *    so the log stays the source of truth.
+ *  - Hard delete is rejected when the account has any transactions
+ *    (history would be silently destroyed). Users with non-empty
+ *    accounts must either delete the transactions first or toggle the
+ *    account inactive (`isActive=false`) — that hides it from the
+ *    dashboard's net-worth and the transaction account picker without
+ *    erasing data.
+ */
+
 const MUTATION_PATHS = ["/accounts", "/", "/transactions"] as const;
 
 async function requireUserId(): Promise<string | null> {
@@ -25,128 +39,145 @@ function getString(fd: FormData, name: string): string | undefined {
 }
 
 function revalidate() {
-  for (const path of MUTATION_PATHS) {
-    revalidatePath(path);
-  }
+  for (const path of MUTATION_PATHS) revalidatePath(path);
 }
+
+// --- Create --------------------------------------------------------------
 
 export async function createAccount(
   _prev: ActionResult<null> | undefined,
-  formData: FormData
+  formData: FormData,
 ): Promise<ActionResult<null>> {
   const userId = await requireUserId();
-  if (!userId) {
-    return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
-  }
+  if (!userId) return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
 
   const parsed = createAccountSchema.safeParse({
     name: getString(formData, "name"),
     type: getString(formData, "type"),
-    balance: getString(formData, "balance"),
     color: getString(formData, "color"),
     icon: getString(formData, "icon"),
+    startingBalance: getString(formData, "startingBalance") ?? "0",
   });
 
   if (!parsed.success) {
     return { ok: false, fieldErrors: parsed.error.flatten().fieldErrors };
   }
 
-  const data = parsed.data;
+  const { name, type, color, icon, startingBalance } = parsed.data;
 
-  try {
-    await prisma.financeAccount.create({
-      data: {
-        userId,
-        name: data.name,
-        type: data.type,
-        balance: new Prisma.Decimal(data.balance),
-        color: data.color || "#388BFD",
-        icon: data.icon || "Wallet",
-        isActive: true,
-      },
-    });
-  } catch (_err) {
-    return { ok: false, error: "Gagal membuat akun baru." };
-  }
+  await prisma.financeAccount.create({
+    data: {
+      userId,
+      name,
+      type,
+      color: color ?? null,
+      icon: icon ?? null,
+      balance: new Prisma.Decimal(startingBalance),
+    },
+  });
 
   revalidate();
   return { ok: true };
 }
+
+// --- Update --------------------------------------------------------------
 
 export async function updateAccount(
   id: string,
   _prev: ActionResult<null> | undefined,
-  formData: FormData
+  formData: FormData,
 ): Promise<ActionResult<null>> {
   const userId = await requireUserId();
-  if (!userId) {
-    return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
-  }
+  if (!userId) return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
 
   const parsed = updateAccountSchema.safeParse({
     name: getString(formData, "name"),
     type: getString(formData, "type"),
-    balance: getString(formData, "balance"),
     color: getString(formData, "color"),
     icon: getString(formData, "icon"),
+    // Checkbox sends "on" when checked, nothing when unchecked.
+    isActive: formData.get("isActive") === "on",
   });
 
   if (!parsed.success) {
     return { ok: false, fieldErrors: parsed.error.flatten().fieldErrors };
   }
 
-  const data = parsed.data;
-
   const existing = await prisma.financeAccount.findFirst({
     where: { id, userId },
+    select: { id: true },
   });
+  if (!existing) return { ok: false, error: "Akun tidak ditemukan." };
 
-  if (!existing) {
-    return { ok: false, error: "Akun tidak ditemukan." };
-  }
-
-  try {
-    await prisma.financeAccount.update({
-      where: { id },
-      data: {
-        name: data.name,
-        type: data.type,
-        balance: new Prisma.Decimal(data.balance),
-        color: data.color || "#388BFD",
-        icon: data.icon || "Wallet",
-      },
-    });
-  } catch (_err) {
-    return { ok: false, error: "Gagal menyimpan perubahan akun." };
-  }
+  await prisma.financeAccount.update({
+    where: { id },
+    data: {
+      name: parsed.data.name,
+      type: parsed.data.type,
+      color: parsed.data.color ?? null,
+      icon: parsed.data.icon ?? null,
+      isActive: parsed.data.isActive ?? true,
+    },
+  });
 
   revalidate();
   return { ok: true };
 }
 
-export async function deleteAccount(id: string): Promise<ActionResult<null>> {
+// --- Toggle active -------------------------------------------------------
+
+export async function toggleAccountActive(
+  id: string,
+): Promise<ActionResult<null>> {
   const userId = await requireUserId();
-  if (!userId) {
-    return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
-  }
+  if (!userId) return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
 
   const existing = await prisma.financeAccount.findFirst({
     where: { id, userId },
+    select: { id: true, isActive: true },
+  });
+  if (!existing) return { ok: false, error: "Akun tidak ditemukan." };
+
+  await prisma.financeAccount.update({
+    where: { id },
+    data: { isActive: !existing.isActive },
   });
 
-  if (!existing) {
-    return { ok: false, error: "Akun tidak ditemukan." };
+  revalidate();
+  return { ok: true };
+}
+
+// --- Delete --------------------------------------------------------------
+
+/**
+ * Hard delete. Refuses if the account has transactions or is the
+ * destination of any transfer — in those cases the user should
+ * deactivate or migrate the data first.
+ */
+export async function deleteAccount(id: string): Promise<ActionResult<null>> {
+  const userId = await requireUserId();
+  if (!userId) return { ok: false, error: "Sesi berakhir, silakan masuk ulang." };
+
+  const existing = await prisma.financeAccount.findFirst({
+    where: { id, userId },
+    select: { id: true },
+  });
+  if (!existing) return { ok: false, error: "Akun tidak ditemukan." };
+
+  const [txCount, transferInCount] = await Promise.all([
+    prisma.transaction.count({ where: { accountId: id } }),
+    prisma.transaction.count({ where: { transferToId: id } }),
+  ]);
+
+  if (txCount > 0 || transferInCount > 0) {
+    return {
+      ok: false,
+      error:
+        "Akun memiliki riwayat transaksi. Nonaktifkan akun atau hapus transaksinya terlebih dahulu.",
+    };
   }
 
-  try {
-    // Perform soft-delete to retain transactions association
-    await prisma.financeAccount.update({
-      where: { id },
-      data: { isActive: false },
-    });
-  } catch (_err) {
-    return { ok: false, error: "Gagal menghapus akun." };
-  }
+  await prisma.financeAccount.delete({ where: { id } });
 
   revalidate();
   return { ok: true };

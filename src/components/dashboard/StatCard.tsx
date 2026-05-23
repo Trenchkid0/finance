@@ -1,37 +1,48 @@
-import { ArrowDownRight, ArrowUpRight } from "lucide-react";
+import { TrendingDown, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
 import { formatIDR, formatPercent } from "@/lib/utils/formatters";
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardAction,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
 /**
- * KPI card — AGENTS.md §4.5 "Stat Cards (KPI)".
+ * KPI card — shadcn dashboard-01 SectionCards pattern, retuned for IDR.
  *
- * - Numbers use `font-mono tabular-nums` (§4.3 critical rule).
- * - Delta colored by direction (income/expense palette per §4.2).
- * - No shadows, border-only (§4.5).
+ * Single component used across dashboard + analytics pages so KPI
+ * styling stays identical everywhere. Three render modes via props:
+ *
+ *   - Default:          label + amount
+ *   - Default + delta:  adds Badge with TrendingUp/Down + percent
+ *   - Default + footer: adds trend label + description below the body
+ *
+ * `tone` colours the amount; `invertDeltaColor` flips the badge palette
+ * for metrics where "up" is bad (expense, debt). `showSign` formats the
+ * amount with explicit ± so net cash-flow reads at a glance.
  */
 export interface StatCardProps {
   label: string;
-  amount: number;
-  /**
-   * Period-over-period delta as a ratio (0.024 = +2.4%). Optional.
-   * When `undefined`, the delta line isn't rendered.
-   */
+  /** Numeric value or pre-formatted display string (for non-currency stats). */
+  amount: number | string;
+  /** Period-over-period delta as a ratio (0.024 = +2.4%). */
   delta?: number;
-  /** Visual tone for the value. Defaults to neutral text-primary. */
+  /** Visual tone for the amount value. */
   tone?: "income" | "expense" | "neutral";
-  icon?: React.ReactNode;
-  /**
-   * When true, prefix the formatted amount with `+` for non-negative
-   * and `-` for negative values. Useful for net cash-flow style
-   * metrics where the sign carries the meaning.
-   */
+  /** Prepend +/- to the amount for net cash-flow style metrics. */
   showSign?: boolean;
-  /**
-   * Flip the delta color logic. Default: positive delta = green (good).
-   * For expense KPIs, set this to `true` so a positive delta — i.e.
-   * pengeluaran NAIK — renders red, and a negative delta renders green.
-   */
+  /** Flip delta color logic (positive delta = bad → red). */
   invertDeltaColor?: boolean;
+  /** Optional icon slot (rendered in CardAction when no delta is shown). */
+  icon?: React.ReactNode;
+  /** Footer headline (one short line). */
+  trendLabel?: string;
+  /** Footer sub-text (muted, one short line). */
+  trendDescription?: string;
 }
 
 export function StatCard({
@@ -39,64 +50,84 @@ export function StatCard({
   amount,
   delta,
   tone = "neutral",
-  icon,
   showSign = false,
   invertDeltaColor = false,
+  icon,
+  trendLabel,
+  trendDescription,
 }: StatCardProps) {
   const valueColor = {
     income: "text-income",
     expense: "text-expense",
-    neutral: "text-text-primary",
+    neutral: "text-foreground",
   }[tone];
 
-  // Always format the magnitude; sign is rendered explicitly so
-  // negatives show as "-Rp 1.250.000" rather than "Rp -1.250.000".
-  const magnitude = formatIDR(Math.abs(amount));
-  const signPrefix = showSign ? (amount >= 0 ? "+" : "-") : "";
+  // Numeric path: format magnitude + render sign separately so
+  // negatives become "-Rp 1.250.000" instead of "Rp -1.250.000".
+  // String path: caller already formatted (e.g. "Belum ada data").
+  const isNumeric = typeof amount === "number";
+  const magnitude = isNumeric ? formatIDR(Math.abs(amount)) : amount;
+  const signPrefix = showSign && isNumeric ? (amount >= 0 ? "+" : "-") : "";
 
-  // For income: positive delta is good (green).
-  // For expense: positive delta is bad (red) — flip with invertDeltaColor.
-  const deltaIsGood =
-    typeof delta === "number"
-      ? invertDeltaColor
-        ? delta < 0
-        : delta >= 0
-      : false;
+  // For income: positive delta is good (income green).
+  // For expense: positive delta is bad (red) when invertDeltaColor=true.
+  const hasDelta = typeof delta === "number";
+  const deltaIsPositiveSign = hasDelta && delta >= 0;
+  const deltaIsGood = hasDelta
+    ? invertDeltaColor
+      ? !deltaIsPositiveSign
+      : deltaIsPositiveSign
+    : false;
+
+  const TrendIcon = deltaIsPositiveSign ? TrendingUp : TrendingDown;
+
+  const showFooter = !!trendLabel || !!trendDescription;
 
   return (
-    <div className="bg-surface border border-border rounded-lg p-6 transition-all duration-200 hover:border-[#444C56]">
-      <div className="flex items-center justify-between mb-3">
-        <p className="text-xs uppercase tracking-wider text-text-muted">
-          {label}
-        </p>
-        {icon ? (
-          <span className="text-text-muted" aria-hidden>
-            {icon}
-          </span>
-        ) : null}
-      </div>
-
-      <p className={cn("text-2xl font-semibold font-mono tabular-nums", valueColor)}>
-        {signPrefix}
-        {magnitude}
-      </p>
-
-      {typeof delta === "number" ? (
-        <p
+    <Card>
+      <CardHeader>
+        <CardDescription>{label}</CardDescription>
+        <CardTitle
           className={cn(
-            "mt-2 inline-flex items-center gap-1 text-xs font-mono tabular-nums",
-            deltaIsGood ? "text-income" : "text-expense",
+            "text-2xl @[200px]/card:text-3xl font-semibold font-mono tabular-nums",
+            valueColor,
+            // Non-currency string values get a smaller size since they
+            // can be longer (e.g. "Belum ada data" or category names).
+            !isNumeric && "text-base @[200px]/card:text-lg font-medium",
           )}
         >
-          {delta >= 0 ? (
-            <ArrowUpRight size={12} />
-          ) : (
-            <ArrowDownRight size={12} />
-          )}
-          {formatPercent(Math.abs(delta))}
-          <span className="text-text-muted ml-1">vs bulan lalu</span>
-        </p>
+          {signPrefix}
+          {magnitude}
+        </CardTitle>
+        {hasDelta ? (
+          <CardAction>
+            <Badge variant={deltaIsGood ? "income" : "expense"}>
+              <TrendIcon size={12} />
+              {deltaIsPositiveSign ? "+" : ""}
+              {formatPercent(delta!)}
+            </Badge>
+          </CardAction>
+        ) : icon ? (
+          <CardAction>
+            <span className="text-muted-foreground" aria-hidden>
+              {icon}
+            </span>
+          </CardAction>
+        ) : null}
+      </CardHeader>
+      {showFooter ? (
+        <CardFooter className="flex-col items-start gap-1.5 text-xs pt-0">
+          {trendLabel ? (
+            <div className="flex items-center gap-1.5 text-foreground font-medium">
+              {trendLabel}
+              {hasDelta ? <TrendIcon size={12} /> : null}
+            </div>
+          ) : null}
+          {trendDescription ? (
+            <div className="text-muted-foreground">{trendDescription}</div>
+          ) : null}
+        </CardFooter>
       ) : null}
-    </div>
+    </Card>
   );
 }

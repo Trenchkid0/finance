@@ -33,12 +33,11 @@ export default function RootLayout({
       lang="id"
       className={`${geistSans.variable} ${geistMono.variable} dark`}
     >
-      <body className="bg-canvas text-text-primary font-sans antialiased">
+      <body className="bg-background text-foreground font-sans antialiased">
         {children}
         <Toaster
           theme="dark"
           closeButton
-          richColors
           position="top-right"
           toastOptions={{
             style: {

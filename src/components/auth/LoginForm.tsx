@@ -1,85 +1,120 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
+import { AlertCircle, Eye, EyeOff, Info, Loader2 } from "lucide-react";
 import { login } from "@/app/actions/auth";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
-/**
- * Client-side login form. Uses `useActionState` so server errors render
- * inline. Disabled state during submit prevents double-submits and is
- * the only feedback motion AGENTS.md §4.7 allows on a form button.
- */
+const isDev = process.env.NODE_ENV === "development";
+
 export function LoginForm() {
   const [state, formAction, pending] = useActionState(login, undefined);
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Dev: pre-fill akun seed untuk one-click sign-in. Production: kosongkan
+  // supaya tidak menampilkan email orang lain di publik.
+  const demoEmail = isDev ? "demo@maybe.local" : "";
+  const demoPassword = isDev ? "password123" : "";
 
   return (
-    <form action={formAction} className="space-y-4" noValidate>
-      <Field
-        label="Email"
-        name="email"
-        type="email"
-        autoComplete="email"
-        defaultValue="demo@maybe.local"
-        error={state?.fieldErrors?.email?.[0]}
-      />
-      <Field
-        label="Kata sandi"
-        name="password"
-        type="password"
-        autoComplete="current-password"
-        defaultValue="password123"
-        error={state?.fieldErrors?.password?.[0]}
-      />
-
-      {state?.error && !state.fieldErrors ? (
-        <p className="text-xs text-expense">{state.error}</p>
+    <div className="space-y-5">
+      {isDev ? (
+        <div className="rounded-md border border-border bg-elevated px-3 py-2.5 flex items-start gap-2">
+          <Info size={13} className="text-muted-foreground mt-0.5 shrink-0" />
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Mode dev — kredensial demo sudah terisi.{" "}
+            <span className="font-mono text-foreground">demo@maybe.local</span>
+          </p>
+        </div>
       ) : null}
 
-      <button
-        type="submit"
-        disabled={pending}
-        className="w-full px-3 py-2 rounded-md text-sm bg-accent text-white hover:bg-blue-500 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-      >
-        {pending ? <Loader2 size={14} className="animate-spin" /> : null}
-        Masuk
-      </button>
+      <form action={formAction} className="space-y-4" noValidate>
+        <div className="space-y-1.5">
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            required
+            defaultValue={demoEmail}
+            placeholder="nama@email.com"
+            aria-invalid={!!state?.fieldErrors?.email}
+          />
+          {state?.fieldErrors?.email?.[0] ? (
+            <p className="text-xs text-destructive">
+              {state.fieldErrors.email[0]}
+            </p>
+          ) : null}
+        </div>
 
-      <p className="text-xs text-text-muted text-center">
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="password">Kata sandi</Label>
+            <Link
+              href="#"
+              tabIndex={-1}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors pointer-events-none opacity-60"
+              aria-disabled
+            >
+              Lupa kata sandi?
+            </Link>
+          </div>
+          <div className="relative">
+            <Input
+              id="password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              required
+              defaultValue={demoPassword}
+              className="pr-10"
+              aria-invalid={!!state?.fieldErrors?.password}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              tabIndex={-1}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
+              aria-label={
+                showPassword ? "Sembunyikan kata sandi" : "Tampilkan kata sandi"
+              }
+            >
+              {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+          {state?.fieldErrors?.password?.[0] ? (
+            <p className="text-xs text-destructive">
+              {state.fieldErrors.password[0]}
+            </p>
+          ) : null}
+        </div>
+
+        {state?.error && !state.fieldErrors ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 flex items-start gap-2">
+            <AlertCircle size={13} className="text-destructive mt-0.5 shrink-0" />
+            <p className="text-xs text-destructive">{state.error}</p>
+          </div>
+        ) : null}
+
+        <Button type="submit" className="w-full" disabled={pending}>
+          {pending ? <Loader2 size={14} className="animate-spin" /> : null}
+          Masuk
+        </Button>
+      </form>
+
+      <p className="text-xs text-muted-foreground text-center">
         Belum punya akun?{" "}
-        <Link href="/register" className="text-accent hover:underline">
-          Daftar
+        <Link
+          href="/register"
+          className="text-primary hover:underline font-medium"
+        >
+          Daftar gratis
         </Link>
       </p>
-    </form>
-  );
-}
-
-interface FieldProps {
-  label: string;
-  name: string;
-  type?: string;
-  autoComplete?: string;
-  defaultValue?: string;
-  error?: string;
-}
-
-function Field({ label, name, type = "text", autoComplete, defaultValue, error }: FieldProps) {
-  return (
-    <div>
-      <label htmlFor={name} className="block text-xs text-text-muted mb-1.5">
-        {label}
-      </label>
-      <input
-        id={name}
-        name={name}
-        type={type}
-        autoComplete={autoComplete}
-        defaultValue={defaultValue}
-        aria-invalid={!!error}
-        className="w-full bg-elevated border border-border rounded-md px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all duration-200"
-      />
-      {error ? <p className="mt-1 text-xs text-expense">{error}</p> : null}
     </div>
   );
 }

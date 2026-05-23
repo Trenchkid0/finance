@@ -1,140 +1,400 @@
-import { Banknote, TrendingDown, TrendingUp } from "lucide-react";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { NetWorthCard } from "@/components/dashboard/NetWorthCard";
-import { StatCard } from "@/components/dashboard/StatCard";
+import { NetWorthHero, type NetWorthPoint, type NetWorthPeriod } from "@/components/dashboard/NetWorthHero";
+import {
+  BalanceSheet,
+  type BalanceGroup,
+  type BalanceAccount,
+} from "@/components/dashboard/BalanceSheet";
+import { CashflowSankey, type SankeyDatum } from "@/components/charts/CashflowSankey";
 import {
   RecentTransactions,
   type RecentTransactionItem,
 } from "@/components/dashboard/RecentTransactions";
-import { CashFlowChart } from "@/components/charts/CashFlowChart";
-import { ExpensePieChart } from "@/components/charts/ExpensePieChart";
 
 /**
- * Dashboard overview — Server Component. Pulls data directly with
- * Prisma (AGENTS.md §5.2). Middleware guarantees `session?.user.id`.
+ * Dashboard overview — Server Component (Maybe-Finance-style).
+ *
+ * Layout (atas → bawah):
+ *   1. Net worth hero (chart + period selector)
+ *   2. Balance sheet (Aset + Liabilitas, side-by-side)
+ *   3. Cashflow sankey (inflow → cashflow node → outflow + surplus)
+ *   4. Recent transactions
+ *
+ * Period & cashflow_period diturunkan dari URL search params supaya bisa
+ * di-bookmark / share. Default 30 hari (30d).
  */
-export default async function DashboardPage() {
+
+type SearchParams = Promise<{
+  period?: string;
+  cashflow_period?: string;
+}>;
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: SearchParams;
+}) {
   const session = await auth();
   const userId = session!.user.id;
+  const params = await searchParams;
 
-  const monthRange = currentAndPreviousMonth();
+  const period = parsePeriod(params.period) ?? "30d";
+  const cashflowPeriod = parsePeriod(params.cashflow_period) ?? "30d";
 
-  const netWorth = await getNetWorth(userId);
+  const userName =
+    session!.user.name?.trim().split(" ")[0] ??
+    session!.user.email?.split("@")[0] ??
+    "kamu";
 
   const [
-    monthlyIncome,
-    monthlyExpenses,
-    previousIncome,
-    previousExpenses,
+    accounts,
+    netWorthSeries,
+    cashflow,
     recent,
-    cashFlow,
-    expenseByCategory,
-    netWorthHistory,
   ] = await Promise.all([
-    getRangeTotal(userId, "income", monthRange.current.start, monthRange.current.end),
-    getRangeTotal(userId, "expense", monthRange.current.start, monthRange.current.end),
-    getRangeTotal(userId, "income", monthRange.previous.start, monthRange.previous.end),
-    getRangeTotal(userId, "expense", monthRange.previous.start, monthRange.previous.end),
+    prisma.financeAccount.findMany({
+      where: { userId, isActive: true },
+      select: { id: true, name: true, type: true, balance: true },
+      orderBy: { createdAt: "asc" },
+    }),
+    getNetWorthSeries(userId, period),
+    getCashflow(userId, cashflowPeriod),
     getRecentTransactions(userId, 8),
-    getCashFlowTrend(userId, 6),
-    getExpenseByCategory(userId),
-    getNetWorthHistory(userId, netWorth, 6),
   ]);
 
-  // Cash flow for the running month — "sisa duit bulan ini".
-  // Positive → ada surplus yang bisa ditabung; negatif → defisit.
-  const monthlyNet = monthlyIncome - monthlyExpenses;
+  const netWorthCurrent = accounts.reduce(
+    (sum, a) => sum + Number(a.balance),
+    0,
+  );
+  const netWorthPrevious =
+    netWorthSeries.length > 0 ? netWorthSeries[0].value : netWorthCurrent;
 
-  // Period-over-period ratios. Returns `undefined` when last month was
-  // zero so the card hides the delta line instead of dividing by zero.
-  const incomeDelta = ratioDelta(monthlyIncome, previousIncome);
-  const expenseDelta = ratioDelta(monthlyExpenses, previousExpenses);
+  // Bangun balance sheet groups dari akun aktif. Untuk MVP semua akun
+  // dianggap aset (skema kita belum punya credit/loan account type).
+  const assetGroups = buildAssetGroups(
+    accounts.map((a) => ({
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      balance: Number(a.balance),
+    })),
+    netWorthCurrent,
+  );
 
   return (
-    <div className="space-y-8">
-      <header>
-        <h1 className="text-3xl font-semibold text-text-primary">Dashboard</h1>
-        <p className="text-sm text-text-muted mt-1">
-          Ringkasan posisi keuangan Anda bulan ini.
+    <div className="space-y-6">
+      <header className="space-y-1">
+        <h1 className="text-2xl lg:text-3xl font-semibold text-foreground">
+          Selamat datang kembali, {capitalize(userName)}
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          Berikut ringkasan keuangan Anda saat ini.
         </p>
       </header>
 
-      <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <NetWorthCard amount={netWorth} history={netWorthHistory} />
-        <StatCard
-          label="Pemasukan bulan ini"
-          amount={monthlyIncome}
-          delta={incomeDelta}
-          tone="income"
-          icon={<TrendingUp size={16} />}
-        />
-        <StatCard
-          label="Pengeluaran bulan ini"
-          amount={monthlyExpenses}
-          delta={expenseDelta}
-          // Naik = jelek untuk pengeluaran, jadi balik palet warna delta.
-          invertDeltaColor
-          tone="expense"
-          icon={<TrendingDown size={16} />}
-        />
-        <StatCard
-          label="Sisa bulan ini"
-          amount={monthlyNet}
-          // Color the value by sign so a deficit is read at a glance.
-          tone={monthlyNet >= 0 ? "income" : "expense"}
-          icon={<Banknote size={16} />}
-          showSign
-        />
-      </section>
+      <NetWorthHero
+        current={netWorthCurrent}
+        previous={netWorthPrevious}
+        period={period}
+        series={netWorthSeries}
+      />
 
-      {/* Charts — cash-flow trend (wider) + category breakdown */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2">
-          <CashFlowChart data={cashFlow} />
-        </div>
-        <div className="lg:col-span-1">
-          <ExpensePieChart data={expenseByCategory} />
-        </div>
-      </section>
+      <BalanceSheet
+        assets={{
+          title: "Assets",
+          total: netWorthCurrent,
+          groups: assetGroups,
+        }}
+        liabilities={{
+          title: "Liabilities",
+          total: 0,
+          groups: [],
+        }}
+      />
 
-      <section>
-        <RecentTransactions transactions={recent} />
-      </section>
+      <CashflowSankey data={cashflow} period={cashflowPeriod} />
+
+      <RecentTransactions transactions={recent} />
     </div>
   );
 }
 
-// --- Queries -------------------------------------------------------------
+// --- Period helpers ------------------------------------------------------
 
-async function getNetWorth(userId: string): Promise<number> {
-  const accounts = await prisma.financeAccount.findMany({
-    where: { userId, isActive: true },
-    select: { balance: true },
-  });
-  return accounts.reduce((sum, a) => sum + Number(a.balance), 0);
+function parsePeriod(raw: string | undefined): NetWorthPeriod | null {
+  if (!raw) return null;
+  const allowed: NetWorthPeriod[] = [
+    "1d",
+    "7d",
+    "30d",
+    "90d",
+    "ytd",
+    "365d",
+    "5y",
+  ];
+  return (allowed as string[]).includes(raw) ? (raw as NetWorthPeriod) : null;
 }
 
-async function getRangeTotal(
+function periodToRange(period: NetWorthPeriod): { start: Date; end: Date } {
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const start = new Date(end);
+
+  switch (period) {
+    case "1d":
+      start.setDate(end.getDate() - 1);
+      break;
+    case "7d":
+      start.setDate(end.getDate() - 7);
+      break;
+    case "30d":
+      start.setDate(end.getDate() - 30);
+      break;
+    case "90d":
+      start.setDate(end.getDate() - 90);
+      break;
+    case "ytd":
+      start.setMonth(0, 1);
+      break;
+    case "365d":
+      start.setDate(end.getDate() - 365);
+      break;
+    case "5y":
+      start.setFullYear(end.getFullYear() - 5);
+      break;
+  }
+  return { start, end };
+}
+
+// --- Net worth series ----------------------------------------------------
+
+/**
+ * Net worth time-series — backwards-rolling dari saldo saat ini.
+ *
+ * Algoritma:
+ *   1. Fetch semua transaksi dalam rentang `period`.
+ *   2. Hitung delta saldo per hari (untuk setiap akun aktif).
+ *   3. Rolling backwards dari saldo saat ini supaya tahu net worth
+ *      pada awal setiap hari.
+ *
+ * Sederhana tapi cukup untuk MVP. Kalau akun banyak / window panjang,
+ * pakai materialized view atau pre-aggregated daily snapshot.
+ */
+async function getNetWorthSeries(
   userId: string,
-  type: "income" | "expense",
-  start: Date,
-  end: Date,
-): Promise<number> {
-  const result = await prisma.transaction.aggregate({
-    where: { userId, type, date: { gte: start, lt: end } },
+  period: NetWorthPeriod,
+): Promise<NetWorthPoint[]> {
+  const { start, end } = periodToRange(period);
+
+  const [accounts, txs] = await Promise.all([
+    prisma.financeAccount.findMany({
+      where: { userId, isActive: true },
+      select: { id: true, balance: true },
+    }),
+    prisma.transaction.findMany({
+      where: {
+        userId,
+        date: { gte: start, lt: end },
+      },
+      select: {
+        type: true,
+        amount: true,
+        date: true,
+        accountId: true,
+        transferToId: true,
+      },
+      orderBy: { date: "asc" },
+    }),
+  ]);
+
+  const currentNetWorth = accounts.reduce(
+    (sum, a) => sum + Number(a.balance),
+    0,
+  );
+
+  // Build daily delta map (key = YYYY-MM-DD).
+  const deltaByDay = new Map<string, number>();
+  for (const tx of txs) {
+    const key = isoDay(tx.date);
+    const amt = Number(tx.amount);
+    let delta = 0;
+    if (tx.type === "income") delta = amt;
+    else if (tx.type === "expense") delta = -amt;
+    // Transfer tidak mengubah net worth (uang pindah antar akun user).
+    deltaByDay.set(key, (deltaByDay.get(key) ?? 0) + delta);
+  }
+
+  // Generate daily points dari `start` ke `end` (exclusive).
+  const points: NetWorthPoint[] = [];
+  const cursor = new Date(start);
+  while (cursor < end) {
+    points.push({ date: isoDay(cursor), value: 0 });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  // Rolling backwards: nilai akhir = currentNetWorth, kurangi delta
+  // hari berikutnya untuk dapat nilai hari ini.
+  if (points.length > 0) {
+    points[points.length - 1].value = currentNetWorth;
+    for (let i = points.length - 2; i >= 0; i--) {
+      const nextDay = points[i + 1].date;
+      const nextDelta = deltaByDay.get(nextDay) ?? 0;
+      points[i].value = points[i + 1].value - nextDelta;
+    }
+  }
+
+  return points;
+}
+
+function isoDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+// --- Cashflow ------------------------------------------------------------
+
+async function getCashflow(userId: string, period: NetWorthPeriod) {
+  const { start, end } = periodToRange(period);
+
+  const grouped = await prisma.transaction.groupBy({
+    by: ["type", "categoryId"],
+    where: {
+      userId,
+      type: { in: ["income", "expense"] },
+      date: { gte: start, lt: end },
+    },
     _sum: { amount: true },
   });
-  return Number(result._sum.amount ?? 0);
+
+  const categoryIds = grouped
+    .map((g) => g.categoryId)
+    .filter((id): id is string => id !== null);
+  const categories = categoryIds.length
+    ? await prisma.category.findMany({
+        where: { id: { in: categoryIds } },
+        select: { id: true, name: true, color: true },
+      })
+    : [];
+  const meta = new Map(categories.map((c) => [c.id, c]));
+
+  const inflow: SankeyDatum[] = [];
+  const outflow: SankeyDatum[] = [];
+  let totalIn = 0;
+  let totalOut = 0;
+
+  for (const g of grouped) {
+    const amount = Number(g._sum.amount ?? 0);
+    if (amount <= 0) continue;
+    const cat = g.categoryId ? meta.get(g.categoryId) : null;
+    const datum: SankeyDatum = {
+      name: cat?.name ?? (g.type === "income" ? "Pemasukan" : "Lainnya"),
+      side: g.type === "income" ? "source" : "target",
+      value: amount,
+      color:
+        cat?.color ??
+        (g.type === "income" ? "#2EA043" : "#F85149"),
+    };
+    if (g.type === "income") {
+      inflow.push(datum);
+      totalIn += amount;
+    } else {
+      outflow.push(datum);
+      totalOut += amount;
+    }
+  }
+
+  // Sort biggest first untuk layout yang nyaman dibaca.
+  inflow.sort((a, b) => b.value - a.value);
+  outflow.sort((a, b) => b.value - a.value);
+
+  const surplus = Math.max(0, totalIn - totalOut);
+
+  return {
+    total: totalIn,
+    inflow,
+    outflow,
+    surplus,
+  };
 }
+
+// --- Balance sheet groups ------------------------------------------------
+
+// Palette biru bertingkat — paling kuat untuk Bank (porsi terbesar
+// biasanya), shade lebih lembut untuk Cash & Investment.
+const ASSET_GROUP_COLOR: Record<string, string> = {
+  cash: "#79B8FF",
+  wallet: "#79B8FF",
+  bank: "#388BFD",
+  investment: "#1F6FEB",
+};
+
+const ASSET_GROUP_LABEL: Record<string, string> = {
+  cash: "Tunai",
+  wallet: "E-wallet",
+  bank: "Bank",
+  investment: "Investasi",
+};
+
+function buildAssetGroups(
+  rows: { id: string; name: string; type: string; balance: number }[],
+  totalNet: number,
+): BalanceGroup[] {
+  // Kelompokkan berdasarkan tipe akun. Tunai + E-wallet kita gabung jadi
+  // "Cash" supaya konsisten dengan referensi (cash + e-wallet sama-sama
+  // likuid harian).
+  const buckets = new Map<string, BalanceAccount[]>();
+  const totals = new Map<string, number>();
+
+  for (const r of rows) {
+    if (r.balance === 0) continue;
+    // Kelompokkan: bank → "Bank", investment → "Investasi", lainnya → "Cash"
+    const groupKey =
+      r.type === "investment" ? "investment" : r.type === "bank" ? "bank" : "cash";
+    const acc: BalanceAccount = {
+      id: r.id,
+      name: r.name,
+      value: r.balance,
+      percent: totalNet > 0 ? (r.balance / totalNet) * 100 : 0,
+      initial: r.name.charAt(0).toUpperCase() || "?",
+    };
+    const list = buckets.get(groupKey) ?? [];
+    list.push(acc);
+    buckets.set(groupKey, list);
+    totals.set(groupKey, (totals.get(groupKey) ?? 0) + r.balance);
+  }
+
+  const groups: BalanceGroup[] = [];
+  for (const [key, accounts] of buckets) {
+    const total = totals.get(key) ?? 0;
+    accounts.sort((a, b) => b.value - a.value);
+    groups.push({
+      name:
+        ASSET_GROUP_LABEL[key] ??
+        key.charAt(0).toUpperCase() + key.slice(1),
+      color: ASSET_GROUP_COLOR[key] ?? "#8B949E",
+      total,
+      percent: totalNet > 0 ? (total / totalNet) * 100 : 0,
+      accounts,
+    });
+  }
+
+  groups.sort((a, b) => b.total - a.total);
+  return groups;
+}
+
+// --- Recent transactions -------------------------------------------------
 
 async function getRecentTransactions(
   userId: string,
   take: number,
 ): Promise<RecentTransactionItem[]> {
   const rows = await prisma.transaction.findMany({
-    where: { userId, type: { in: ["income", "expense"] } },
-    include: { category: true, account: true },
+    where: { userId },
+    include: {
+      category: { select: { name: true, icon: true } },
+      account: { select: { name: true } },
+      transferTo: { select: { name: true } },
+    },
     orderBy: { date: "desc" },
     take,
   });
@@ -142,195 +402,16 @@ async function getRecentTransactions(
   return rows.map((tx) => ({
     id: tx.id,
     description: tx.description ?? tx.category?.name ?? "Transaksi",
-    categoryName: tx.category?.name ?? "Lainnya",
+    categoryName: tx.category?.name ?? null,
+    categoryIcon: tx.category?.icon ?? null,
     accountName: tx.account.name,
-    date: tx.date,
-    // Decimal must be serialised before crossing the SC → CC boundary.
+    transferToName: tx.transferTo?.name ?? null,
+    date: tx.date.toISOString(),
     amount: Number(tx.amount),
-    type: tx.type as "income" | "expense",
+    type: tx.type as "income" | "expense" | "transfer",
   }));
 }
 
-/**
- * Income vs expense totals per month over the last `months` months.
- * Returns oldest → newest so the chart renders left-to-right naturally.
- *
- * One round trip: pull every transaction in the window, then bucket
- * client-side. For a personal-finance scale (1k–10k tx/yr) this is
- * cheaper than 2N aggregate queries and avoids row-by-row date math.
- */
-async function getCashFlowTrend(
-  userId: string,
-  months: number,
-): Promise<{ month: string; income: number; expense: number }[]> {
-  const now = new Date();
-  const windowStart = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
-
-  const rows = await prisma.transaction.findMany({
-    where: {
-      userId,
-      type: { in: ["income", "expense"] },
-      date: { gte: windowStart },
-    },
-    select: { type: true, amount: true, date: true },
-  });
-
-  // Pre-seed every bucket so months with zero activity still show on the axis.
-  const buckets = new Map<string, { month: string; income: number; expense: number }>();
-  for (let i = months - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    buckets.set(monthKey(d), {
-      month: monthLabel(d),
-      income: 0,
-      expense: 0,
-    });
-  }
-
-  for (const tx of rows) {
-    const bucket = buckets.get(monthKey(tx.date));
-    if (!bucket) continue;
-    if (tx.type === "income") bucket.income += Number(tx.amount);
-    else if (tx.type === "expense") bucket.expense += Number(tx.amount);
-  }
-
-  return [...buckets.values()];
-}
-
-/** Pengeluaran bulan berjalan, dikelompokkan per kategori, urut terbesar. */
-async function getExpenseByCategory(
-  userId: string,
-): Promise<{ category: string; amount: number }[]> {
-  const start = startOfThisMonth();
-
-  const grouped = await prisma.transaction.groupBy({
-    by: ["categoryId"],
-    where: { userId, type: "expense", date: { gte: start } },
-    _sum: { amount: true },
-  });
-
-  const categoryIds = grouped
-    .map((g) => g.categoryId)
-    .filter((id): id is string => id !== null);
-
-  const categories = categoryIds.length
-    ? await prisma.category.findMany({
-        where: { id: { in: categoryIds } },
-        select: { id: true, name: true },
-      })
-    : [];
-  const nameById = new Map(categories.map((c) => [c.id, c.name]));
-
-  return grouped
-    .map((g) => ({
-      category: g.categoryId ? nameById.get(g.categoryId) ?? "Lainnya" : "Lainnya",
-      amount: Number(g._sum.amount ?? 0),
-    }))
-    .filter((row) => row.amount > 0)
-    .sort((a, b) => b.amount - a.amount);
-}
-
-// --- Date / math helpers -------------------------------------------------
-
-function startOfThisMonth(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1);
-}
-
-/**
- * Half-open ranges [start, end) for the current and previous calendar
- * months. Using `< end` instead of `<= end-1ms` is safer at month
- * boundaries and lets aggregates use a clean `lt`.
- */
-function currentAndPreviousMonth() {
-  const now = new Date();
-  const currentStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const nextStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  const previousStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-
-  return {
-    current: { start: currentStart, end: nextStart },
-    previous: { start: previousStart, end: currentStart },
-  };
-}
-
-/**
- * Period-over-period ratio as `(now - prev) / prev`. Returns `undefined`
- * when prev is zero — the UI hides the delta line instead of showing
- * "+∞" or some misleading "+100%".
- */
-function ratioDelta(current: number, previous: number): number | undefined {
-  if (previous === 0) return undefined;
-  return (current - previous) / previous;
-}
-
-function monthKey(d: Date): string {
-  return `${d.getFullYear()}-${d.getMonth()}`;
-}
-
-function monthLabel(d: Date): string {
-  return new Intl.DateTimeFormat("id-ID", { month: "short" }).format(d);
-}
-
-async function getNetWorthHistory(
-  userId: string,
-  currentNetWorth: number,
-  months: number = 6
-): Promise<{ month: string; value: number }[]> {
-  const now = new Date();
-  const windowStart = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
-
-  const transactions = await prisma.transaction.findMany({
-    where: {
-      userId,
-      type: { in: ["income", "expense"] },
-      date: { gte: windowStart },
-    },
-    select: { type: true, amount: true, date: true },
-  });
-
-  const monthChanges = new Map<string, number>();
-  
-  for (let i = 0; i < months; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = `${d.getFullYear()}-${d.getMonth()}`;
-    monthChanges.set(key, 0);
-  }
-
-  for (const tx of transactions) {
-    const d = tx.date;
-    const key = `${d.getFullYear()}-${d.getMonth()}`;
-    if (monthChanges.has(key)) {
-      const amt = Number(tx.amount);
-      const delta = tx.type === "income" ? amt : -amt;
-      monthChanges.set(key, (monthChanges.get(key) || 0) + delta);
-    }
-  }
-
-  const history: { month: string; value: number }[] = [];
-  const monthKeys: string[] = [];
-  const monthLabels: string[] = [];
-
-  for (let i = months - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    monthKeys.push(`${d.getFullYear()}-${d.getMonth()}`);
-    monthLabels.push(new Intl.DateTimeFormat("id-ID", { month: "short" }).format(d));
-  }
-
-  let runningNetWorth = currentNetWorth;
-  const values: number[] = new Array(months);
-  for (let i = months - 1; i >= 0; i--) {
-    values[i] = runningNetWorth;
-    const key = monthKeys[i];
-    const changeInMonth = monthChanges.get(key) || 0;
-    runningNetWorth -= changeInMonth;
-  }
-
-  for (let i = 0; i < months; i++) {
-    history.push({
-      month: monthLabels[i],
-      value: values[i] < 0 ? 0 : values[i],
-    });
-  }
-
-  return history;
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }

@@ -93,24 +93,51 @@ export const updateTransactionSchema = transactionFields.superRefine(applyCrossF
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
 
-// --- Accounts -----------------------------------------------------------
+// --- Accounts ------------------------------------------------------------
 
 export const accountTypeEnum = z.enum(["bank", "wallet", "cash", "investment"]);
 export type AccountTypeInput = z.infer<typeof accountTypeEnum>;
 
-export const createAccountSchema = z.object({
-  name: requiredString("Nama akun"),
+const accountFields = z.object({
+  name: requiredString("Nama akun").max(80),
   type: accountTypeEnum,
-  balance: z.coerce
-    .number({ invalid_type_error: "Saldo harus berupa angka" })
-    .finite()
-    .max(999_999_999_999, "Saldo terlalu besar"),
-  color: z.string().trim().max(20).optional(),
-  icon: z.string().trim().max(50).optional(),
+  /** Optional hex color; UI picks from a curated swatch list. */
+  color: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-fA-F]{6}$/, "Format warna tidak valid")
+    .optional(),
+  /** Single emoji or short token used as the account avatar. */
+  icon: z.string().trim().max(8).optional(),
 });
 
-export const updateAccountSchema = createAccountSchema;
+export const createAccountSchema = accountFields.extend({
+  /** Saldo awal — nol dibolehkan, negatif tidak. Hanya berlaku saat create. */
+  startingBalance: z.coerce
+    .number({ invalid_type_error: "Saldo harus berupa angka" })
+    .min(0, "Saldo awal tidak boleh negatif")
+    .max(999_999_999_999, "Saldo terlalu besar")
+    .default(0),
+});
+
+/** Update tidak menyentuh saldo — saldo hanya berubah lewat transaksi. */
+export const updateAccountSchema = accountFields.extend({
+  /** Toggle aktif/nonaktif lewat form edit. */
+  isActive: z.coerce.boolean().optional(),
+});
 
 export type CreateAccountInput = z.infer<typeof createAccountSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountSchema>;
 
+// --- Categories ---------------------------------------------------------
+
+export const categoryTypeEnum = z.enum(["income", "expense"]);
+export type CategoryTypeInput = z.infer<typeof categoryTypeEnum>;
+
+export const createCategorySchema = z.object({
+  name: requiredString("Nama kategori"),
+  type: categoryTypeEnum,
+  icon: z.string().trim().max(10).optional().or(z.literal("")),
+});
+
+export type CreateCategoryInput = z.infer<typeof createCategorySchema>;

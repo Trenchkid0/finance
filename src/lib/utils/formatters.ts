@@ -77,3 +77,14 @@ export function formatDateShort(date: Date | string): string {
     month: "short",
   }).format(new Date(date));
 }
+
+/**
+ * Short month label for chart axes — "Mei". Same locale across all
+ * pages so the user doesn't see "Mei 2026" on one page and "Mei" on
+ * another. Use this everywhere a chart needs a month tick label.
+ */
+export function formatMonthLabel(date: Date | string): string {
+  return new Intl.DateTimeFormat("id-ID", { month: "short" }).format(
+    new Date(date),
+  );
+}

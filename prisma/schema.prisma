@@ -29,6 +29,7 @@ model User {
   financeAccounts FinanceAccount[]
   categories      Category[]
   transactions    Transaction[]
+  apiKeys         ApiKey[]
 
   @@map("users")
 }
@@ -135,6 +136,55 @@ model Category {
 
   @@index([userId])
   @@map("categories")
+}
+
+/// API key untuk akses programatik (bot, integrasi eksternal).
+///
+/// Plain key (64-char hex acak) HANYA ditampilkan sekali saat dibuat;
+/// di DB cuma kita simpan `keyHash` (SHA-256 hex) dan `keyPrefix`
+/// (12 karakter pertama) supaya tetap bisa identifikasi key di UI
+/// tanpa mengekspos rahasianya.
+///
+/// Cocok untuk personal access token: 1 user bisa punya banyak key,
+/// masing-masing bisa di-revoke independen.
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  /// Label bebas dari user, mis. "Telegram bot personal".
+  name       String
+  /// 12 karakter awal dari plain key untuk display ("bc90e40a7e76..."). Bukan rahasia.
+  keyPrefix  String
+  /// SHA-256 hex dari plain key. Tidak pernah disimpan plain.
+  keyHash    String    @unique
+  /// Diisi otomatis tiap kali key dipakai untuk autentikasi sukses.
+  lastUsedAt DateTime?
+  /// Soft revoke. Sekali di-set, key langsung tidak valid.
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+/// User-defined monthly spending budget per category. One row per
+/// (userId, categoryId) — the limit applies to every month going
+/// forward until edited. We keep history out for now (Phase 1 MVP);
+/// Phase 2 may swap this for a per-period BudgetEntry table.
+model Budget {
+  id         String   @id @default(cuid())
+  userId     String
+  categoryId String
+  /// Monthly limit in IDR (whole rupiah is fine but we keep the same
+  /// 15,2 decimal precision as Transaction for consistency).
+  limit      Decimal  @db.Decimal(15, 2)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, categoryId])
+  @@index([userId])
+  @@map("budgets")
 }
 
 /// A single financial event. Transfer-type rows link two FinanceAccounts
